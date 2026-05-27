@@ -3,3 +3,4 @@ pdfplumber
 plotly
 pandas
 pgeocode
+reportlab
