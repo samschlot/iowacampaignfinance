@@ -29,6 +29,286 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
 #  PDF EXPORT
 # =============================================================================
 
+
+
+# =============================================================================
+#  CITY LABELS
+# =============================================================================
+MAJOR_CITIES = [
+    # Iowa — only the most prominent
+    ("Des Moines",     41.5868, -93.6250),
+    ("Cedar Rapids",   41.9779, -91.6656),
+    ("Davenport",      41.5236, -90.5776),
+    ("Sioux City",     42.4999, -96.4003),
+    ("Iowa City",      41.6611, -91.5302),
+    ("Waterloo",       42.4928, -92.3426),
+    ("Dubuque",        42.5006, -90.6646),
+    # Major US cities only
+    ("New York",       40.7128, -74.0060),
+    ("Los Angeles",    34.0522,-118.2437),
+    ("Chicago",        41.8781, -87.6298),
+    ("Houston",        29.7604, -95.3698),
+    ("Phoenix",        33.4484,-112.0740),
+    ("Philadelphia",   39.9526, -75.1652),
+    ("San Antonio",    29.4241, -98.4936),
+    ("San Diego",      32.7157,-117.1611),
+    ("Dallas",         32.7767, -96.7970),
+    ("San Francisco",  37.7749,-122.4194),
+    ("Seattle",        47.6062,-122.3321),
+    ("Denver",         39.7392,-104.9903),
+    ("Washington DC",  38.9072, -77.0369),
+    ("Boston",         42.3601, -71.0589),
+    ("Atlanta",        33.7490, -84.3880),
+    ("Miami",          25.7617, -80.1918),
+    ("Minneapolis",    44.9778, -93.2650),
+    ("Kansas City",    39.0997, -94.5786),
+    ("Omaha",          41.2565, -95.9345),
+    ("St. Louis",      38.6270, -90.1994),
+    ("Nashville",      36.1627, -86.7816),
+    ("Las Vegas",      36.1699,-115.1398),
+    ("Portland",       45.5051,-122.6750),
+    ("Salt Lake City", 40.7608,-111.8910),
+    ("Sioux Falls",    43.5473, -96.7283),
+]
+
+
+
+# =============================================================================
+#  ZIP GEOCODER  — cached so it only downloads once per session
+# =============================================================================
+def load_geocoder():
+    """Load pgeocode geocoder — no caching so installs are picked up immediately."""
+    try:
+        import pgeocode
+        return pgeocode.Nominatim("us")
+    except ImportError:
+        return None
+
+def batch_geocode(zipcodes: list) -> dict:
+    """
+    Geocode a list of unique zip codes in one vectorised call.
+    Returns dict {zipcode: (lat, lon)} for all successfully resolved zips.
+    """
+    try:
+        import pgeocode
+        nomi = pgeocode.Nominatim("us")
+        unique = list(set(str(z).zfill(5) for z in zipcodes if z))
+        if not unique:
+            return {}
+        # query_postal_code accepts a list and returns a DataFrame
+        # with the postal_code column matching our input order
+        results = nomi.query_postal_code(unique)
+        out = {}
+        # results.postal_code aligns with our unique list
+        for _, row in results.iterrows():
+            z = str(row.get("postal_code", "")).zfill(5)
+            if z and not pd.isna(row["latitude"]) and not pd.isna(row["longitude"]):
+                out[z] = (float(row["latitude"]), float(row["longitude"]))
+        return out
+    except Exception:
+        return {}
+
+
+# =============================================================================
+#  PARSING
+# =============================================================================
+MONEY_RE       = re.compile(r"\$([\d,]+\.\d{2})")
+IOWA_FOOTER_RE = re.compile(r"^IOWA ETHICS AND CAMPAIGN")
+CITY_LINE_RE   = re.compile(r".+,\s+[A-Z]{2}\s+\d{5}")
+EXP_DATA_RE    = re.compile(r"^(\d{1,2}/\d{1,2}/\d{4})\s+.+?\s+\$([\d,]+\.\d{2})\s*$")
+# Handles: DATE [Check # ] ADDRESS [Relation] $AMT
+CONTRIB_DATA_RE = re.compile(
+    r"^(\d{2}/\d{2}/\d{4})\s+(?:Check #\s+)?(.+?)\s+"
+    r"(?:(None|Self|Brother|Sister|Spouse|Father|Mother|Son|Daughter|"
+    r"Aunt|Uncle|Cousin|Friend|Employer|Employee)\s+)?"
+    r"\$([\d,]+\.\d{2})\s*$"
+)
+# Andrews-style single-line unitemized: "MM/DD/YYYY Unitemized $X.XX"
+UNITEMIZED_RE = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+Unitemized\s+\$([\d,]+\.\d{2})\s*$")
+
+HEADER_SKIP_RE = re.compile(
+    r"^(Committee Type:|County:|District:|Committee Code:|Political Party:|"
+    r"Report Date:|Candidate Name:|Treasurer|Last Name:|Address:|City:|"
+    r"Chairperson|Statement of|Additional Assets|Generated On|"
+    r"Contribution Contribution|Name and Address|Date Committee|"
+    r"Expenditure Expenditure|Schedule [A-Z]\d?:|DR-2 |Filed Date|"
+    r"Statutory|Adjusted|Postmark|Amendment|E-Mail:|Grand Total|"
+    r"Total Regular|Total Fundraiser|Total Amount|Sub-Total|Loans In|"
+    r"Status:|Sch-)"
+)
+PURPOSE_WORDS = {
+    "Other","Expenditure","Consultant","Services","Salary &","Gratuity",
+    "Mileage","Travel","Charitable","Contributions","Fundraiser","Food",
+    "Printing &","Reproduction","Bank Charges","Advertising","Professional",
+    "Fees","Political","Contribution","Reimbursement","Meals",
+}
+
+def parse_money(s):
+    m = MONEY_RE.search(s); return float(m.group(1).replace(",","")) if m else 0.0
+
+def is_skip(s):
+    return not s or IOWA_FOOTER_RE.match(s) or HEADER_SKIP_RE.match(s) or re.match(r"^\d+ of \d+$", s)
+
+def is_purpose(s):
+    if s in PURPOSE_WORDS: return True
+    stripped = re.sub(r"^Check #\s*\d*\s*", "", s).strip()
+    return stripped in PURPOSE_WORDS
+
+def extract_lines(pdf_bytes):
+    lines = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            lines.extend((page.extract_text() or "").splitlines())
+    return lines
+
+def parse_summary_fields(lines):
+    d = {"committee_name":"","report_date":"","filed_date":"","political_party":"",
+         "cash_start":0.0,"cash_contributions":0.0,"loans_received":0.0,
+         "property_sales":0.0,"expenditures":0.0,"cash_end":0.0,
+         "unpaid_bills":0.0,"outstanding_loans":0.0}
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if "DR-2 Disclosure Summary Page DR-2" in s:
+            for j in range(i+1, min(i+5, len(lines))):
+                cand = lines[j].strip()
+                if cand and not cand.startswith("Generated On"):
+                    d["committee_name"] = re.split(r"\s{2,}|Status:", cand)[0].strip(); break
+        if s.startswith("Report Date:"):
+            m = re.search(r"Report Date:\s*(\S+)", s)
+            if m: d["report_date"] = m.group(1)
+        if s.startswith("Political Party:"):
+            m = re.search(r"Political Party:\s*(\S+)", s)
+            if m: d["political_party"] = m.group(1)
+        if "Filed Date" in s:
+            m = re.search(r"Filed Date\s+(\d{1,2}/\d{1,2}/\d{4})", s)
+            if m: d["filed_date"] = m.group(1)
+        for label, key in [
+            ("Cash On Hand At Start Of Period","cash_start"),
+            ("Schedule A: Cash Contributions Total","cash_contributions"),
+            ("Schedule F1: Loans Received Total","loans_received"),
+            ("Schedule H2: Campaign Property Sales","property_sales"),
+            ("Schedule B: Expenditure Total","expenditures"),
+            ("Cash on Hand at End of Period","cash_end"),
+            ("Schedule D: Unpaid Bills","unpaid_bills"),
+            ("Schedule F2: Outstanding Loans","outstanding_loans"),
+        ]:
+            if label.lower() in s.lower(): d[key] = parse_money(s)
+    return d
+
+def parse_contributions(lines):
+    contribs = []
+    in_section = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if "Schedule A: Contributions" in s or "Sch-A" in s:
+            in_section = True; continue
+        if in_section and "Schedule B: Expenditures" in s: break
+        if not in_section: continue
+
+        # Andrews-style single-line unitemized
+        m_u = UNITEMIZED_RE.match(s)
+        if m_u:
+            contribs.append({"date":m_u.group(1),"name":"Unitemized",
+                              "state":"","zipcode":"","amount":float(m_u.group(2).replace(",",""))})
+            continue
+
+        m = CONTRIB_DATA_RE.match(s)
+        if not m: continue
+        date   = m.group(1)
+        amount = float(m.group(4).replace(",",""))
+
+        # Walk back for name
+        name = ""
+        for k in range(i-1, max(i-7,-1), -1):
+            cand = lines[k].strip()
+            if not cand or is_skip(cand): continue
+            if CONTRIB_DATA_RE.match(cand) or UNITEMIZED_RE.match(cand): break
+            if CITY_LINE_RE.match(cand): continue
+            if cand == "Check #" or re.match(r"^\d+$", cand): continue
+            if is_purpose(cand): continue
+            name = cand; break
+
+        if not name or is_purpose(name): name = "Unknown"
+        if name.lower().startswith("unitemized"): name = "Unitemized"
+
+        state = zipcode = ""
+        # City/state may be on line i+1 (normal) or i+2 (when check number is on i+1)
+        for offset in (1, 2):
+            if i + offset < len(lines):
+                m2 = re.search(r",\s+([A-Z]{2})\s+(\d{5})", lines[i + offset])
+                if m2:
+                    state, zipcode = m2.group(1), m2.group(2)
+                    break
+        contribs.append({"date":date,"name":name,"state":state,"zipcode":zipcode,"amount":amount})
+    return contribs
+
+def parse_expenditures(lines):
+    exp_list = []
+    in_section = False
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if "Schedule B: Expenditures" in s and "Sch-B" in s:
+            in_section = True; i += 1; continue
+        if in_section and s.startswith("Total Amount"): break
+        if not in_section or is_skip(s): i += 1; continue
+
+        m = EXP_DATA_RE.match(s)
+        if m:
+            date   = m.group(1)
+            amount = float(m.group(2).replace(",",""))
+            name = ""
+            for k in range(i-1, max(i-7,-1), -1):
+                cand = lines[k].strip()
+                if not cand or is_skip(cand): continue
+                if EXP_DATA_RE.match(cand): break
+                if CITY_LINE_RE.match(cand): continue
+                if cand == "Check #" or re.match(r"^\d+$", cand): continue
+                if is_purpose(cand): continue
+                name = cand; break
+
+            desc = ""
+            j = i + 1
+            city_found = False
+            while j < len(lines) and j < i + 6:
+                cand = lines[j].strip()
+                if not cand or is_skip(cand): j += 1; continue
+                if EXP_DATA_RE.match(cand): break
+                if CITY_LINE_RE.match(cand): city_found = True; j += 1; continue
+                if city_found:
+                    if not re.match(r"^\d+$", cand) and not is_purpose(cand):
+                        desc = cand; break
+                j += 1
+
+            exp_list.append({"date":date,"name":name or "Unknown",
+                              "category":desc or "Other","amount":amount})
+        i += 1
+    return exp_list
+
+def parse_disclosure(pdf_bytes):
+    lines = extract_lines(pdf_bytes)
+    summary = parse_summary_fields(lines)
+    # Receipts = cash contributions + loans received + property sales
+    summary["receipts"] = (summary["cash_contributions"]
+                           + summary["loans_received"]
+                           + summary["property_sales"])
+    return {**summary,
+            "contributions":     parse_contributions(lines),
+            "expenditures_list": parse_expenditures(lines)}
+
+
+# =============================================================================
+#  HELPERS
+# =============================================================================
+def fmt_cur(v): return f"${v:,.2f}"
+def fmt_pct(v): return f"{v:.1f}%"
+
+def metric_card(label, value, color=""):
+    cls = ("metric-value " + color).strip()
+    return (f'<div class="metric-card"><div class="metric-label">{label}</div>'
+            f'<div class="{cls}">{value}</div></div>')
+
+
 def build_pdf_report(d, contributions, exp_df_with_cats,
                      receipts, expenditures, debts, n_contribs, avg_contrib, burn_rate,
                      notes_df=None):
@@ -357,6 +637,7 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
 
     map_img_bytes  = None
     iowa_img_bytes = None
+    _map_error_msg = None
 
     try:
         import plotly.graph_objects as go
@@ -457,8 +738,10 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
             )
             iowa_img_bytes = _pio.to_image(fig_ia, format="png", scale=2, engine="kaleido")
 
-    except Exception:
-        pass
+    except Exception as _map_err:
+        _map_error_msg = str(_map_err)
+    else:
+        _map_error_msg = None
 
     if map_img_bytes:
         story.append(RLImage(io.BytesIO(map_img_bytes), width=7.0*inch, height=3.2*inch))
@@ -468,9 +751,10 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
         story.append(Spacer(1, 10))
 
     if not map_img_bytes:
-        story.append(Paragraph(
-            "Map images unavailable — install kaleido and pgeocode to include them.",
-            caption_style))
+        msg = ("Map images unavailable."
+               + (f" Error: {_map_error_msg}" if _map_error_msg else
+                  " Ensure kaleido and pgeocode are installed in Streamlit's Python."))
+        story.append(Paragraph(msg, caption_style))
 
     # By-state table
     story.append(Paragraph("Contributions by State (>1% of cash contributions)", sub_style))
@@ -499,284 +783,6 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
     doc.build(story)
     return buf.getvalue()
 
-
-
-# =============================================================================
-#  CITY LABELS
-# =============================================================================
-MAJOR_CITIES = [
-    # Iowa — only the most prominent
-    ("Des Moines",     41.5868, -93.6250),
-    ("Cedar Rapids",   41.9779, -91.6656),
-    ("Davenport",      41.5236, -90.5776),
-    ("Sioux City",     42.4999, -96.4003),
-    ("Iowa City",      41.6611, -91.5302),
-    ("Waterloo",       42.4928, -92.3426),
-    ("Dubuque",        42.5006, -90.6646),
-    # Major US cities only
-    ("New York",       40.7128, -74.0060),
-    ("Los Angeles",    34.0522,-118.2437),
-    ("Chicago",        41.8781, -87.6298),
-    ("Houston",        29.7604, -95.3698),
-    ("Phoenix",        33.4484,-112.0740),
-    ("Philadelphia",   39.9526, -75.1652),
-    ("San Antonio",    29.4241, -98.4936),
-    ("San Diego",      32.7157,-117.1611),
-    ("Dallas",         32.7767, -96.7970),
-    ("San Francisco",  37.7749,-122.4194),
-    ("Seattle",        47.6062,-122.3321),
-    ("Denver",         39.7392,-104.9903),
-    ("Washington DC",  38.9072, -77.0369),
-    ("Boston",         42.3601, -71.0589),
-    ("Atlanta",        33.7490, -84.3880),
-    ("Miami",          25.7617, -80.1918),
-    ("Minneapolis",    44.9778, -93.2650),
-    ("Kansas City",    39.0997, -94.5786),
-    ("Omaha",          41.2565, -95.9345),
-    ("St. Louis",      38.6270, -90.1994),
-    ("Nashville",      36.1627, -86.7816),
-    ("Las Vegas",      36.1699,-115.1398),
-    ("Portland",       45.5051,-122.6750),
-    ("Salt Lake City", 40.7608,-111.8910),
-    ("Sioux Falls",    43.5473, -96.7283),
-]
-
-
-
-# =============================================================================
-#  ZIP GEOCODER  — cached so it only downloads once per session
-# =============================================================================
-def load_geocoder():
-    """Load pgeocode geocoder — no caching so installs are picked up immediately."""
-    try:
-        import pgeocode
-        return pgeocode.Nominatim("us")
-    except ImportError:
-        return None
-
-def batch_geocode(zipcodes: list) -> dict:
-    """
-    Geocode a list of unique zip codes in one vectorised call.
-    Returns dict {zipcode: (lat, lon)} for all successfully resolved zips.
-    """
-    try:
-        import pgeocode
-        nomi = pgeocode.Nominatim("us")
-        unique = list(set(str(z).zfill(5) for z in zipcodes if z))
-        if not unique:
-            return {}
-        # query_postal_code accepts a list and returns a DataFrame
-        # with the postal_code column matching our input order
-        results = nomi.query_postal_code(unique)
-        out = {}
-        # results.postal_code aligns with our unique list
-        for _, row in results.iterrows():
-            z = str(row.get("postal_code", "")).zfill(5)
-            if z and not pd.isna(row["latitude"]) and not pd.isna(row["longitude"]):
-                out[z] = (float(row["latitude"]), float(row["longitude"]))
-        return out
-    except Exception:
-        return {}
-
-
-# =============================================================================
-#  PARSING
-# =============================================================================
-MONEY_RE       = re.compile(r"\$([\d,]+\.\d{2})")
-IOWA_FOOTER_RE = re.compile(r"^IOWA ETHICS AND CAMPAIGN")
-CITY_LINE_RE   = re.compile(r".+,\s+[A-Z]{2}\s+\d{5}")
-EXP_DATA_RE    = re.compile(r"^(\d{1,2}/\d{1,2}/\d{4})\s+.+?\s+\$([\d,]+\.\d{2})\s*$")
-# Handles: DATE [Check # ] ADDRESS [Relation] $AMT
-CONTRIB_DATA_RE = re.compile(
-    r"^(\d{2}/\d{2}/\d{4})\s+(?:Check #\s+)?(.+?)\s+"
-    r"(?:(None|Self|Brother|Sister|Spouse|Father|Mother|Son|Daughter|"
-    r"Aunt|Uncle|Cousin|Friend|Employer|Employee)\s+)?"
-    r"\$([\d,]+\.\d{2})\s*$"
-)
-# Andrews-style single-line unitemized: "MM/DD/YYYY Unitemized $X.XX"
-UNITEMIZED_RE = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+Unitemized\s+\$([\d,]+\.\d{2})\s*$")
-
-HEADER_SKIP_RE = re.compile(
-    r"^(Committee Type:|County:|District:|Committee Code:|Political Party:|"
-    r"Report Date:|Candidate Name:|Treasurer|Last Name:|Address:|City:|"
-    r"Chairperson|Statement of|Additional Assets|Generated On|"
-    r"Contribution Contribution|Name and Address|Date Committee|"
-    r"Expenditure Expenditure|Schedule [A-Z]\d?:|DR-2 |Filed Date|"
-    r"Statutory|Adjusted|Postmark|Amendment|E-Mail:|Grand Total|"
-    r"Total Regular|Total Fundraiser|Total Amount|Sub-Total|Loans In|"
-    r"Status:|Sch-)"
-)
-PURPOSE_WORDS = {
-    "Other","Expenditure","Consultant","Services","Salary &","Gratuity",
-    "Mileage","Travel","Charitable","Contributions","Fundraiser","Food",
-    "Printing &","Reproduction","Bank Charges","Advertising","Professional",
-    "Fees","Political","Contribution","Reimbursement","Meals",
-}
-
-def parse_money(s):
-    m = MONEY_RE.search(s); return float(m.group(1).replace(",","")) if m else 0.0
-
-def is_skip(s):
-    return not s or IOWA_FOOTER_RE.match(s) or HEADER_SKIP_RE.match(s) or re.match(r"^\d+ of \d+$", s)
-
-def is_purpose(s):
-    if s in PURPOSE_WORDS: return True
-    stripped = re.sub(r"^Check #\s*\d*\s*", "", s).strip()
-    return stripped in PURPOSE_WORDS
-
-def extract_lines(pdf_bytes):
-    lines = []
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            lines.extend((page.extract_text() or "").splitlines())
-    return lines
-
-def parse_summary_fields(lines):
-    d = {"committee_name":"","report_date":"","filed_date":"","political_party":"",
-         "cash_start":0.0,"cash_contributions":0.0,"loans_received":0.0,
-         "property_sales":0.0,"expenditures":0.0,"cash_end":0.0,
-         "unpaid_bills":0.0,"outstanding_loans":0.0}
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if "DR-2 Disclosure Summary Page DR-2" in s:
-            for j in range(i+1, min(i+5, len(lines))):
-                cand = lines[j].strip()
-                if cand and not cand.startswith("Generated On"):
-                    d["committee_name"] = re.split(r"\s{2,}|Status:", cand)[0].strip(); break
-        if s.startswith("Report Date:"):
-            m = re.search(r"Report Date:\s*(\S+)", s)
-            if m: d["report_date"] = m.group(1)
-        if s.startswith("Political Party:"):
-            m = re.search(r"Political Party:\s*(\S+)", s)
-            if m: d["political_party"] = m.group(1)
-        if "Filed Date" in s:
-            m = re.search(r"Filed Date\s+(\d{1,2}/\d{1,2}/\d{4})", s)
-            if m: d["filed_date"] = m.group(1)
-        for label, key in [
-            ("Cash On Hand At Start Of Period","cash_start"),
-            ("Schedule A: Cash Contributions Total","cash_contributions"),
-            ("Schedule F1: Loans Received Total","loans_received"),
-            ("Schedule H2: Campaign Property Sales","property_sales"),
-            ("Schedule B: Expenditure Total","expenditures"),
-            ("Cash on Hand at End of Period","cash_end"),
-            ("Schedule D: Unpaid Bills","unpaid_bills"),
-            ("Schedule F2: Outstanding Loans","outstanding_loans"),
-        ]:
-            if label.lower() in s.lower(): d[key] = parse_money(s)
-    return d
-
-def parse_contributions(lines):
-    contribs = []
-    in_section = False
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if "Schedule A: Contributions" in s or "Sch-A" in s:
-            in_section = True; continue
-        if in_section and "Schedule B: Expenditures" in s: break
-        if not in_section: continue
-
-        # Andrews-style single-line unitemized
-        m_u = UNITEMIZED_RE.match(s)
-        if m_u:
-            contribs.append({"date":m_u.group(1),"name":"Unitemized",
-                              "state":"","zipcode":"","amount":float(m_u.group(2).replace(",",""))})
-            continue
-
-        m = CONTRIB_DATA_RE.match(s)
-        if not m: continue
-        date   = m.group(1)
-        amount = float(m.group(4).replace(",",""))
-
-        # Walk back for name
-        name = ""
-        for k in range(i-1, max(i-7,-1), -1):
-            cand = lines[k].strip()
-            if not cand or is_skip(cand): continue
-            if CONTRIB_DATA_RE.match(cand) or UNITEMIZED_RE.match(cand): break
-            if CITY_LINE_RE.match(cand): continue
-            if cand == "Check #" or re.match(r"^\d+$", cand): continue
-            if is_purpose(cand): continue
-            name = cand; break
-
-        if not name or is_purpose(name): name = "Unknown"
-        if name.lower().startswith("unitemized"): name = "Unitemized"
-
-        state = zipcode = ""
-        # City/state may be on line i+1 (normal) or i+2 (when check number is on i+1)
-        for offset in (1, 2):
-            if i + offset < len(lines):
-                m2 = re.search(r",\s+([A-Z]{2})\s+(\d{5})", lines[i + offset])
-                if m2:
-                    state, zipcode = m2.group(1), m2.group(2)
-                    break
-        contribs.append({"date":date,"name":name,"state":state,"zipcode":zipcode,"amount":amount})
-    return contribs
-
-def parse_expenditures(lines):
-    exp_list = []
-    in_section = False
-    i = 0
-    while i < len(lines):
-        s = lines[i].strip()
-        if "Schedule B: Expenditures" in s and "Sch-B" in s:
-            in_section = True; i += 1; continue
-        if in_section and s.startswith("Total Amount"): break
-        if not in_section or is_skip(s): i += 1; continue
-
-        m = EXP_DATA_RE.match(s)
-        if m:
-            date   = m.group(1)
-            amount = float(m.group(2).replace(",",""))
-            name = ""
-            for k in range(i-1, max(i-7,-1), -1):
-                cand = lines[k].strip()
-                if not cand or is_skip(cand): continue
-                if EXP_DATA_RE.match(cand): break
-                if CITY_LINE_RE.match(cand): continue
-                if cand == "Check #" or re.match(r"^\d+$", cand): continue
-                if is_purpose(cand): continue
-                name = cand; break
-
-            desc = ""
-            j = i + 1
-            city_found = False
-            while j < len(lines) and j < i + 6:
-                cand = lines[j].strip()
-                if not cand or is_skip(cand): j += 1; continue
-                if EXP_DATA_RE.match(cand): break
-                if CITY_LINE_RE.match(cand): city_found = True; j += 1; continue
-                if city_found:
-                    if not re.match(r"^\d+$", cand) and not is_purpose(cand):
-                        desc = cand; break
-                j += 1
-
-            exp_list.append({"date":date,"name":name or "Unknown",
-                              "category":desc or "Other","amount":amount})
-        i += 1
-    return exp_list
-
-def parse_disclosure(pdf_bytes):
-    lines = extract_lines(pdf_bytes)
-    summary = parse_summary_fields(lines)
-    # Receipts = cash contributions + loans received + property sales
-    summary["receipts"] = (summary["cash_contributions"]
-                           + summary["loans_received"]
-                           + summary["property_sales"])
-    return {**summary,
-            "contributions":     parse_contributions(lines),
-            "expenditures_list": parse_expenditures(lines)}
-
-
-# =============================================================================
-#  HELPERS
-# =============================================================================
-def fmt_cur(v): return f"${v:,.2f}"
-def fmt_pct(v): return f"{v:.1f}%"
-
-def metric_card(label, value, color=""):
-    cls = ("metric-value " + color).strip()
-    return (f'<div class="metric-card"><div class="metric-label">{label}</div>'
-            f'<div class="{cls}">{value}</div></div>')
 
 
 # =============================================================================
