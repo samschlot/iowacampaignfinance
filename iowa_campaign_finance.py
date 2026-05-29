@@ -176,27 +176,38 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
                 notes_lookup = {}
 
             def make_note_cell(name):
-                """Return a Paragraph with clickable hyperlinks parsed from the note."""
+                """Return a Paragraph with clickable hyperlinks for PDF export.
+                Supports [link text](https://url) and bare https:// URLs."""
+                import re as _re
                 note = notes_lookup.get(name, "")
                 if not note:
                     return Paragraph("", small_style)
-                # Convert markdown-style [text](url) or bare URLs to hyperlinks
-                import re as _re
-                # Replace [text](url) with <a href="url">text</a>
-                note = _re.sub(
-                    r'\[([^\]]+)\]\((https?://[^\)]+)\)',
-                    r'<a href="" color="blue"><u></u></a>',
-                    note
-                )
-                # Replace bare URLs not already in an anchor
-                note = _re.sub(
-                    r'(?<!href=")(https?://\S+)(?![^<]*>)',
-                    r'<a href="" color="blue"><u></u></a>',
-                    note
-                )
-                return Paragraph(note, small_style)
 
-            # Build table with notes column
+                # Process markdown links: [text](url) -> <link href="url">text</link>
+                def md_link_replace(m):
+                    txt, url = m.group(1), m.group(2)
+                    return '<link href="' + url + '"><font color="#0d6efd"><u>' + txt + '</u></font></link>'
+
+                note_html = _re.sub(
+                    r'\[([^\]]+)\]\((https?://[^\)]+)\)',
+                    md_link_replace,
+                    note
+                )
+
+                # Process bare URLs not inside an existing link tag
+                def bare_url_replace(m):
+                    url = m.group(1)
+                    return '<link href="' + url + '"><font color="#0d6efd"><u>' + url + '</u></font></link>'
+
+                note_html = _re.sub(
+                    r'(?<!["\(])(https?://[^\s<>"\)]+)',
+                    bare_url_replace,
+                    note_html
+                )
+
+                return Paragraph(note_html, small_style)
+
+                        # Build table with notes column
             has_notes = any(notes_lookup.get(r["Contributor"], "") for _, r in notable.iterrows())
             if has_notes:
                 headers = ["Contributor", "Total", "Notes"]
@@ -277,6 +288,7 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
 
         # Try to render map image via plotly + kaleido
         map_img_bytes = None
+        iowa_img_bytes = None
         try:
             import plotly.graph_objects as go
 
@@ -297,54 +309,94 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
                           .agg(total=("amount","sum"), count=("amount","count"))
                           .reset_index())
                 mx = map_df["total"].max()
-                map_df["size"] = map_df["total"].apply(lambda v: 8 + (v/mx)*20)
+                map_df["size"] = map_df["total"].apply(lambda v: 5 + (v/mx)*12)
 
-                fig_map = go.Figure()
-                fig_map.add_trace(go.Scattergeo(
-                    lat=map_df["lat"], lon=map_df["lon"],
-                    text=map_df.apply(
-                        lambda r: f"ZIP: {r['zipcode']}<br>State: {r['state']}<br>"
-                                  f"Total: {currency(r['total'])}", axis=1),
-                    hoverinfo="text", mode="markers",
-                    marker=dict(
-                        size=map_df["size"], color=map_df["total"],
-                        colorscale=[[0,"#c8e6c9"],[0.4,"#66bb6a"],[0.7,"#2e7d32"],[1,"#1b5e20"]],
-                        cmin=map_df["total"].min(), cmax=mx,
-                        colorbar=dict(title=dict(text="$",side="right"), thickness=10, len=0.5),
-                        line=dict(width=0.5, color="white"), opacity=0.88,
-                    ),
-                ))
-                # City labels
-                fig_map.add_trace(go.Scattergeo(
-                    lat=[c[1] for c in MAJOR_CITIES],
-                    lon=[c[2] for c in MAJOR_CITIES],
-                    text=[c[0] for c in MAJOR_CITIES],
-                    mode="text",
-                    textfont=dict(size=7, color="#000000"),
-                    hoverinfo="skip", showlegend=False,
-                ))
-                fig_map.update_layout(
-                    geo=dict(
+                def _make_map_fig(city_labels, lon_range, lat_range, height, width,
+                                  title_text=None, proj_scale=1.0, proj_center=None):
+                    """Build a Plotly geo figure for PDF export."""
+                    fig = go.Figure()
+                    fig.add_trace(go.Scattergeo(
+                        lat=map_df["lat"], lon=map_df["lon"],
+                        text=map_df.apply(
+                            lambda r: f"ZIP: {r['zipcode']}<br>State: {r['state']}<br>"
+                                      f"Total: {currency(r['total'])}", axis=1),
+                        hoverinfo="text", mode="markers",
+                        marker=dict(
+                            size=map_df["size"], color=map_df["total"],
+                            colorscale=[[0,"#c8e6c9"],[0.4,"#66bb6a"],[0.7,"#2e7d32"],[1,"#1b5e20"]],
+                            cmin=map_df["total"].min(), cmax=mx,
+                            colorbar=dict(title=dict(text="$",side="right"), thickness=10, len=0.5),
+                            line=dict(width=0.5, color="white"), opacity=0.88,
+                        ),
+                    ))
+                    if city_labels:
+                        fig.add_trace(go.Scattergeo(
+                            lat=[c[1] for c in city_labels],
+                            lon=[c[2] for c in city_labels],
+                            text=[c[0] for c in city_labels],
+                            mode="text",
+                            textfont=dict(size=7, color="#000000"),
+                            hoverinfo="skip", showlegend=False,
+                        ))
+                    geo_dict = dict(
                         scope="usa", projection_type="albers usa",
                         showland=True, landcolor="#f5f5f5",
                         showlakes=True, lakecolor="#d4eaf7",
                         showrivers=True, rivercolor="#d4eaf7",
                         subunitcolor="#cccccc", subunitwidth=0.8,
                         bgcolor="white",
-                    ),
-                    margin=dict(l=0, r=0, t=10, b=0),
-                    height=380, width=720,
-                    paper_bgcolor="white",
+                        projection=dict(scale=proj_scale),
+                    )
+                    if proj_center:
+                        geo_dict["center"] = proj_center
+                    fig.update_layout(
+                        geo=geo_dict,
+                        title=dict(text=title_text, x=0.5, font=dict(size=11)) if title_text else None,
+                        margin=dict(l=0, r=0, t=30 if title_text else 10, b=0),
+                        height=height, width=width,
+                        paper_bgcolor="white",
+                    )
+                    return fig
+
+                # National labels: only Des Moines from Iowa, plus major US cities
+                IOWA_CITY_NAMES = {"Des Moines","Cedar Rapids","Davenport",
+                                   "Sioux City","Iowa City","Waterloo","Dubuque"}
+                national_labels = [c for c in MAJOR_CITIES if c[0] not in
+                                   (IOWA_CITY_NAMES - {"Des Moines"})]
+                iowa_labels = [c for c in MAJOR_CITIES if c[0] in IOWA_CITY_NAMES]
+
+                # Full US map — use projection center, not lat/lon range
+                fig_us = _make_map_fig(
+                    city_labels=national_labels,
+                    lon_range=[-124, -68], lat_range=[23, 50],
+                    height=340, width=720,
+                    title_text="Contributions — National View",
                 )
-                img_buf_tmp = io.BytesIO()
-                fig_map.write_image(img_buf_tmp, format="png", scale=2)
-                map_img_bytes = img_buf_tmp.getvalue()
+                buf_us = io.BytesIO()
+                fig_us.write_image(buf_us, format="png", scale=2)
+                map_img_bytes = buf_us.getvalue()
+
+                # Iowa zoomed map — use projection scale+center rather than ranges
+                # scale=4 zooms in ~4x on Iowa; center puts Iowa in the middle
+                fig_ia = _make_map_fig(
+                    city_labels=iowa_labels,
+                    lon_range=[-96.8, -90.1], lat_range=[40.4, 43.6],
+                    height=340, width=720,
+                    title_text="Contributions — Iowa Detail",
+                    proj_scale=4.0,
+                    proj_center=dict(lat=42.0, lon=-93.5),
+                )
+                buf_ia = io.BytesIO()
+                fig_ia.write_image(buf_ia, format="png", scale=2)
+                iowa_img_bytes = buf_ia.getvalue()
         except Exception as _kaleido_err:
             pass  # kaleido not installed or geocoder unavailable — skip map image
 
         if map_img_bytes:
-            img_buf = io.BytesIO(map_img_bytes)
-            story.append(RLImage(img_buf, width=7.0*inch, height=3.7*inch))
+            story.append(RLImage(io.BytesIO(map_img_bytes), width=7.0*inch, height=3.3*inch))
+            story.append(Spacer(1, 6))
+        if 'iowa_img_bytes' in dir() and iowa_img_bytes:
+            story.append(RLImage(io.BytesIO(iowa_img_bytes), width=7.0*inch, height=3.3*inch))
             story.append(Spacer(1, 8))
 
         # By-state table
@@ -399,36 +451,42 @@ st.markdown("""
 #  CITY LABELS
 # =============================================================================
 MAJOR_CITIES = [
-    ("Des Moines",41.5868,-93.6250),("Cedar Rapids",41.9779,-91.6656),
-    ("Davenport",41.5236,-90.5776),("Sioux City",42.4999,-96.4003),
-    ("Iowa City",41.6611,-91.5302),("Waterloo",42.4928,-92.3426),
-    ("Ames",42.0347,-93.6200),        ("Dubuque",42.5006,-90.6646),    ("New York",40.7128,-74.0060),
-    ("Los Angeles",34.0522,-118.2437),("Chicago",41.8781,-87.6298),
-    ("Houston",29.7604,-95.3698),("Phoenix",33.4484,-112.0740),
-    ("Philadelphia",39.9526,-75.1652),("San Antonio",29.4241,-98.4936),
-    ("San Diego",32.7157,-117.1611),("Dallas",32.7767,-96.7970),
-    ("Austin",30.2672,-97.7431),("Fort Worth",32.7555,-97.3308),
-    ("Columbus",39.9612,-82.9988),("Indianapolis",39.7684,-86.1581),
-    ("Charlotte",35.2271,-80.8431),("San Francisco",37.7749,-122.4194),
-    ("Seattle",47.6062,-122.3321),("Denver",39.7392,-104.9903),
-    ("Washington DC",38.9072,-77.0369),("Nashville",36.1627,-86.7816),
-    ("Oklahoma City",35.4676,-97.5164),("Boston",42.3601,-71.0589),
-    ("Portland",45.5051,-122.6750),("Las Vegas",36.1699,-115.1398),
-    ("Memphis",35.1495,-90.0490),("Louisville",38.2527,-85.7585),
-    ("Baltimore",39.2904,-76.6122),("Milwaukee",43.0389,-87.9065),
-    ("Albuquerque",35.0844,-106.6504),("Tucson",32.2226,-110.9747),
-    ("Sacramento",38.5816,-121.4944),("Kansas City",39.0997,-94.5786),
-    ("Atlanta",33.7490,-84.3880),("Omaha",41.2565,-95.9345),
-    ("Minneapolis",44.9778,-93.2650),("Tampa",27.9506,-82.4572),
-    ("New Orleans",29.9511,-90.0715),("Wichita",37.6872,-97.3301),
-    ("Salt Lake City",40.7608,-111.8910),("Tallahassee",30.4518,-84.2807),
-    ("Richmond",37.5407,-77.4360),("Grand Rapids",42.9634,-85.6681),
-    ("Pittsburgh",40.4406,-79.9959),("St. Louis",38.6270,-90.1994),
-    ("Cincinnati",39.1031,-84.5120),("Cleveland",41.4993,-81.6944),
-    ("Buffalo",42.8864,-78.8784),("Madison",43.0731,-89.4012),
-    ("Miami",25.7617,-80.1918),("Sioux Falls",43.5473,-96.7283),
-    ("Lincoln",40.8136,-96.7026),("Fort Collins",40.5853,-105.0844),
+    # Iowa — only the most prominent
+    ("Des Moines",     41.5868, -93.6250),
+    ("Cedar Rapids",   41.9779, -91.6656),
+    ("Davenport",      41.5236, -90.5776),
+    ("Sioux City",     42.4999, -96.4003),
+    ("Iowa City",      41.6611, -91.5302),
+    ("Waterloo",       42.4928, -92.3426),
+    ("Dubuque",        42.5006, -90.6646),
+    # Major US cities only
+    ("New York",       40.7128, -74.0060),
+    ("Los Angeles",    34.0522,-118.2437),
+    ("Chicago",        41.8781, -87.6298),
+    ("Houston",        29.7604, -95.3698),
+    ("Phoenix",        33.4484,-112.0740),
+    ("Philadelphia",   39.9526, -75.1652),
+    ("San Antonio",    29.4241, -98.4936),
+    ("San Diego",      32.7157,-117.1611),
+    ("Dallas",         32.7767, -96.7970),
+    ("San Francisco",  37.7749,-122.4194),
+    ("Seattle",        47.6062,-122.3321),
+    ("Denver",         39.7392,-104.9903),
+    ("Washington DC",  38.9072, -77.0369),
+    ("Boston",         42.3601, -71.0589),
+    ("Atlanta",        33.7490, -84.3880),
+    ("Miami",          25.7617, -80.1918),
+    ("Minneapolis",    44.9778, -93.2650),
+    ("Kansas City",    39.0997, -94.5786),
+    ("Omaha",          41.2565, -95.9345),
+    ("St. Louis",      38.6270, -90.1994),
+    ("Nashville",      36.1627, -86.7816),
+    ("Las Vegas",      36.1699,-115.1398),
+    ("Portland",       45.5051,-122.6750),
+    ("Salt Lake City", 40.7608,-111.8910),
+    ("Sioux Falls",    43.5473, -96.7283),
 ]
+
 
 
 # =============================================================================
@@ -762,8 +820,11 @@ if contributions:
                    column_config={
                        "Name":         st.column_config.TextColumn("Name"),
                        "Contribution": st.column_config.TextColumn("Contribution", disabled=True),
-                       "Notes":        st.column_config.TextColumn("Notes"),
-                   }, hide_index=True, key="notable_donors")
+                       "Notes":        st.column_config.TextColumn(
+                           "Notes",
+                           help="Add notes. Use [link text](https://url.com) for hyperlinks in PDF export."
+                       ),
+                   }, hide_index=False, key="notable_donors")
 else:
     st.warning("No contribution data could be parsed.")
 
@@ -940,7 +1001,7 @@ try:
                            f"Total: {fmt_cur(r['total'])}<br>Contributions: {int(r['count'])}"),
                 axis=1)
             mx = map_df["total"].max()
-            map_df["size"] = map_df["total"].apply(lambda v: 8 + (v/mx)*20)
+            map_df["size"] = map_df["total"].apply(lambda v: 5 + (v/mx)*12)
 
             fig_map = go.Figure()
             fig_map.add_trace(go.Scattergeo(
@@ -992,10 +1053,11 @@ try:
                             .groupby("state")["amount"].count().reset_index()
                             .rename(columns={"state":"State","amount":"# Contributions"}))
             state_df = state_df.merge(state_counts, on="State", how="left")
+            # Filter to states representing >1% of contributions
+            state_df = state_df[state_df["Amount"] / receipts * 100 > 1.0]
             state_df["% of Contributions"] = (state_df["Amount"]/receipts*100).apply(fmt_pct)
             state_df["Amount"] = state_df["Amount"].apply(fmt_cur)
-            # Top 10 only
-            state_df = state_df.head(10)[["State","# Contributions","Amount","% of Contributions"]]
+            state_df = state_df[["State","# Contributions","Amount","% of Contributions"]]
             st.dataframe(state_df.reset_index(drop=True), use_container_width=True, hide_index=True)
             unmapped = receipts - total_mapped
             if unmapped > 0.01:
@@ -1013,11 +1075,34 @@ if st.button("Generate PDF Report", type="primary"):
     with st.spinner("Building PDF…"):
         try:
             # Grab edited notable donors table from session state
-            # Streamlit stores data_editor results as dicts — convert to DataFrame
-            _raw_notes = st.session_state.get("notable_donors", None)
-            if _raw_notes is not None:
-                notes_df = pd.DataFrame(_raw_notes) if isinstance(_raw_notes, dict) else _raw_notes
-            else:
+            # Streamlit data_editor stores edits as {"edited_rows":{}, "added_rows":[], "deleted_rows":[]}
+            # We rebuild the full table by applying edits to the original notable_init
+            try:
+                _edits = st.session_state.get("notable_donors", None)
+                if _edits is not None and isinstance(_edits, dict) and "edited_rows" in _edits:
+                    # Reconstruct from the base notable table
+                    _eligible = pivot[(pivot["Total"] < 10_000) &
+                                      (~pivot["Contributor"].isin(["Unitemized","Unknown"]))]
+                    _notable_base = (pd.concat([_eligible.head(10),
+                                                _eligible[_eligible["Total"] >= 1_000]])
+                                     .drop_duplicates("Contributor")
+                                     .sort_values("Total", ascending=False))
+                    notes_df = pd.DataFrame({
+                        "Name": _notable_base["Contributor"].astype(str).tolist(),
+                        "Contribution": _notable_base["Total"].apply(fmt_cur).tolist(),
+                        "Notes": [""] * len(_notable_base),
+                    })
+                    # Apply edits
+                    for row_idx, edits in _edits.get("edited_rows", {}).items():
+                        for col, val in edits.items():
+                            notes_df.at[int(row_idx), col] = val
+                    # Apply added rows
+                    for added in _edits.get("added_rows", []):
+                        notes_df = pd.concat([notes_df, pd.DataFrame([added])],
+                                             ignore_index=True)
+                else:
+                    notes_df = None
+            except Exception:
                 notes_df = None
             pdf_bytes = build_pdf_report(
                 d=d,
