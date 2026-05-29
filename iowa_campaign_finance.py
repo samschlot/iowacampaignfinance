@@ -1013,7 +1013,12 @@ if st.button("Generate PDF Report", type="primary"):
     with st.spinner("Building PDF…"):
         try:
             # Grab edited notable donors table from session state
-            notes_df = st.session_state.get("notable_donors", None)
+            # Streamlit stores data_editor results as dicts — convert to DataFrame
+            _raw_notes = st.session_state.get("notable_donors", None)
+            if _raw_notes is not None:
+                notes_df = pd.DataFrame(_raw_notes) if isinstance(_raw_notes, dict) else _raw_notes
+            else:
+                notes_df = None
             pdf_bytes = build_pdf_report(
                 d=d,
                 contributions=contributions,
