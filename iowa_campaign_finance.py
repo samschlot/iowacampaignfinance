@@ -30,7 +30,8 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
 # =============================================================================
 
 def build_pdf_report(d, contributions, exp_df_with_cats,
-                     receipts, expenditures, debts, n_contribs, avg_contrib, burn_rate):
+                     receipts, expenditures, debts, n_contribs, avg_contrib, burn_rate,
+                     notes_df=None):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
@@ -168,9 +169,74 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
         if notable.empty:
             story.append(Paragraph("No additional notable donors.", body_style))
         else:
-            rows = [(r["Contributor"], currency(r["Total"])) for _, r in notable.iterrows()]
-            story.append(data_table(["Contributor","Total"],
-                                    rows, [5.0*inch, 2.0*inch], right_cols=[1]))
+            # Merge in any notes from the editable table
+            if notes_df is not None and not notes_df.empty:
+                notes_lookup = dict(zip(notes_df["Name"], notes_df.get("Notes", [""] * len(notes_df))))
+            else:
+                notes_lookup = {}
+
+            def make_note_cell(name):
+                """Return a Paragraph with clickable hyperlinks parsed from the note."""
+                note = notes_lookup.get(name, "")
+                if not note:
+                    return Paragraph("", small_style)
+                # Convert markdown-style [text](url) or bare URLs to hyperlinks
+                import re as _re
+                # Replace [text](url) with <a href="url">text</a>
+                note = _re.sub(
+                    r'\[([^\]]+)\]\((https?://[^\)]+)\)',
+                    r'<a href="" color="blue"><u></u></a>',
+                    note
+                )
+                # Replace bare URLs not already in an anchor
+                note = _re.sub(
+                    r'(?<!href=")(https?://\S+)(?![^<]*>)',
+                    r'<a href="" color="blue"><u></u></a>',
+                    note
+                )
+                return Paragraph(note, small_style)
+
+            # Build table with notes column
+            has_notes = any(notes_lookup.get(r["Contributor"], "") for _, r in notable.iterrows())
+            if has_notes:
+                headers = ["Contributor", "Total", "Notes"]
+                col_w   = [2.5*inch, 1.3*inch, 3.2*inch]
+                all_rows = [[Paragraph(f"<b>{h}</b>", small_style) for h in headers]]
+                for _, r in notable.iterrows():
+                    all_rows.append([
+                        Paragraph(str(r["Contributor"]), small_style),
+                        Paragraph(currency(r["Total"]), small_style),
+                        make_note_cell(r["Contributor"]),
+                    ])
+            else:
+                headers = ["Contributor", "Total"]
+                col_w   = [5.0*inch, 2.0*inch]
+                all_rows = [[Paragraph(f"<b>{h}</b>", small_style) for h in headers]]
+                for _, r in notable.iterrows():
+                    all_rows.append([
+                        Paragraph(str(r["Contributor"]), small_style),
+                        Paragraph(currency(r["Total"]), small_style),
+                    ])
+
+            IOWA_BLUE  = colors.HexColor("#0d6efd")
+            LIGHT_GRAY = colors.HexColor("#f8f9fa")
+            RULE_COLOR = colors.HexColor("#dee2e6")
+            t = Table(all_rows, colWidths=col_w, repeatRows=1)
+            t.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0), (-1,0),  colors.black),
+                ("TEXTCOLOR",     (0,0), (-1,0),  colors.white),
+                ("FONTNAME",      (0,0), (-1,0),  "Helvetica-Bold"),
+                ("FONTSIZE",      (0,0), (-1,-1), 8),
+                ("ROWBACKGROUNDS",(0,1), (-1,-1), [colors.white, LIGHT_GRAY]),
+                ("GRID",          (0,0), (-1,-1), 0.3, RULE_COLOR),
+                ("LEFTPADDING",   (0,0), (-1,-1), 5),
+                ("RIGHTPADDING",  (0,0), (-1,-1), 5),
+                ("TOPPADDING",    (0,0), (-1,-1), 3),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                ("ALIGN",         (1,0), (1,-1),  "RIGHT"),
+                ("VALIGN",        (0,0), (-1,-1), "TOP"),
+            ]))
+            story.append(t)
 
     # ── EXPENDITURES ──────────────────────────────────────────────────────────
     story.append(PageBreak())
@@ -270,8 +336,10 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
                     height=380, width=720,
                     paper_bgcolor="white",
                 )
-                map_img_bytes = fig_map.to_image(format="png", scale=2)
-        except Exception:
+                img_buf_tmp = io.BytesIO()
+                fig_map.write_image(img_buf_tmp, format="png", scale=2)
+                map_img_bytes = img_buf_tmp.getvalue()
+        except Exception as _kaleido_err:
             pass  # kaleido not installed or geocoder unavailable — skip map image
 
         if map_img_bytes:
@@ -334,10 +402,7 @@ MAJOR_CITIES = [
     ("Des Moines",41.5868,-93.6250),("Cedar Rapids",41.9779,-91.6656),
     ("Davenport",41.5236,-90.5776),("Sioux City",42.4999,-96.4003),
     ("Iowa City",41.6611,-91.5302),("Waterloo",42.4928,-92.3426),
-    ("Ames",42.0347,-93.6200),("West Des Moines",41.5772,-93.7113),
-    ("Ankeny",41.7317,-93.6002),("Council Bluffs",41.2619,-95.8608),
-    ("Dubuque",42.5006,-90.6646),("Johnston",41.6775,-93.6974),
-    ("Urbandale",41.6267,-93.7122),("New York",40.7128,-74.0060),
+    ("Ames",42.0347,-93.6200),        ("Dubuque",42.5006,-90.6646),    ("New York",40.7128,-74.0060),
     ("Los Angeles",34.0522,-118.2437),("Chicago",41.8781,-87.6298),
     ("Houston",29.7604,-95.3698),("Phoenix",33.4484,-112.0740),
     ("Philadelphia",39.9526,-75.1652),("San Antonio",29.4241,-98.4936),
@@ -723,8 +788,8 @@ if exp_list:
     # Apply overrides and merges to get effective category for each row
     def effective_cat(row):
         if str(row["idx"]) in overrides:
-            return overrides[str(row["idx"])]
-        cat = row["category"]
+            return overrides[str(row["idx"])].title()
+        cat = row["category"].title()
         return merged.get(cat, cat)
 
     exp_df["eff_cat"] = exp_df.apply(effective_cat, axis=1)
@@ -947,6 +1012,8 @@ st.markdown('<div class="section-header">📄 Export Report</div>', unsafe_allow
 if st.button("Generate PDF Report", type="primary"):
     with st.spinner("Building PDF…"):
         try:
+            # Grab edited notable donors table from session state
+            notes_df = st.session_state.get("notable_donors", None)
             pdf_bytes = build_pdf_report(
                 d=d,
                 contributions=contributions,
@@ -957,6 +1024,7 @@ if st.button("Generate PDF Report", type="primary"):
                 n_contribs=n_contribs,
                 avg_contrib=avg_contrib,
                 burn_rate=burn_rate,
+                notes_df=notes_df,
             )
             safe_name = re.sub(r"[^\w\s-]", "", d["committee_name"]).strip().replace(" ", "_")
             st.download_button(
