@@ -31,119 +31,187 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
 
 def build_pdf_report(d, contributions, exp_df_with_cats,
                      receipts, expenditures, debts, n_contribs, avg_contrib, burn_rate,
-                     loans=None, notes_df=None):
+                     notes_df=None):
+    """Generate a polished PDF report. Returns bytes."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
-        leftMargin=0.75*inch, rightMargin=0.75*inch,
-        topMargin=0.75*inch, bottomMargin=0.75*inch,
+        leftMargin=0.65*inch, rightMargin=0.65*inch,
+        topMargin=0.65*inch, bottomMargin=0.65*inch,
         title=d["committee_name"],
     )
 
-    base = getSampleStyleSheet()
-    IOWA_BLUE  = colors.HexColor("#0d6efd")
-    DARK       = colors.HexColor("#212529")
-    MID        = colors.HexColor("#6c757d")
-    LIGHT_GRAY = colors.HexColor("#f8f9fa")
-    RULE_COLOR = colors.HexColor("#dee2e6")
+    # ── Palette ───────────────────────────────────────────────────────────────
+    NAVY        = colors.HexColor("#1a2744")
+    ACCENT      = colors.HexColor("#2563eb")
+    GREEN       = colors.HexColor("#16a34a")
+    RED         = colors.HexColor("#dc2626")
+    GOLD        = colors.HexColor("#d97706")
+    DARK        = colors.HexColor("#111827")
+    MID         = colors.HexColor("#6b7280")
+    LIGHT       = colors.HexColor("#f3f4f6")
+    WHITE       = colors.white
+    RULE        = colors.HexColor("#e5e7eb")
+    HEADER_BG   = colors.HexColor("#1e3a5f")
 
-    title_style = ParagraphStyle("T2", parent=base["Normal"],
-        fontSize=22, fontName="Helvetica-Bold", textColor=DARK, spaceAfter=4, leading=26)
-    meta_style  = ParagraphStyle("Meta", parent=base["Normal"],
-        fontSize=9, textColor=MID, spaceAfter=16)
+    # ── Styles ────────────────────────────────────────────────────────────────
+    base = getSampleStyleSheet()
+
+    cover_title = ParagraphStyle("CoverTitle", parent=base["Normal"],
+        fontSize=28, fontName="Helvetica-Bold", textColor=WHITE,
+        leading=34, spaceAfter=6)
+    cover_sub = ParagraphStyle("CoverSub", parent=base["Normal"],
+        fontSize=11, textColor=colors.HexColor("#93c5fd"), leading=16)
+    cover_meta = ParagraphStyle("CoverMeta", parent=base["Normal"],
+        fontSize=9, textColor=colors.HexColor("#cbd5e1"), leading=13)
+
     section_style = ParagraphStyle("Sec", parent=base["Normal"],
-        fontSize=13, fontName="Helvetica-Bold", textColor=DARK, spaceBefore=6, spaceAfter=8)
+        fontSize=14, fontName="Helvetica-Bold", textColor=NAVY,
+        spaceBefore=4, spaceAfter=6, borderPad=0)
     sub_style = ParagraphStyle("Sub", parent=base["Normal"],
-        fontSize=10, fontName="Helvetica-Bold", textColor=DARK, spaceBefore=10, spaceAfter=4)
+        fontSize=10, fontName="Helvetica-Bold", textColor=DARK,
+        spaceBefore=8, spaceAfter=3)
     body_style = ParagraphStyle("Body", parent=base["Normal"],
         fontSize=9, textColor=DARK, leading=13)
     small_style = ParagraphStyle("Small", parent=base["Normal"],
-        fontSize=8, textColor=MID, leading=11)
+        fontSize=8, textColor=DARK, leading=11)
+    caption_style = ParagraphStyle("Caption", parent=base["Normal"],
+        fontSize=7.5, textColor=MID, leading=10, spaceAfter=4)
 
-    def rule():
-        return HRFlowable(width="100%", thickness=0.5, color=RULE_COLOR, spaceAfter=8, spaceBefore=4)
+    def rule(color=RULE, thickness=0.5):
+        return HRFlowable(width="100%", thickness=thickness,
+                          color=color, spaceAfter=6, spaceBefore=2)
 
-    def section_header(text):
-        return [rule(), Paragraph(text, section_style)]
+    def section_header(text, color=NAVY):
+        return [
+            rule(color=ACCENT, thickness=1.5),
+            Paragraph(text, section_style),
+            Spacer(1, 4),
+        ]
 
     def currency(v): return f"${v:,.2f}"
     def pct(v):      return f"{v:.1f}%"
 
-    def data_table(headers, rows, col_widths=None, right_cols=None):
+    # ── Data table ────────────────────────────────────────────────────────────
+    def data_table(headers, rows, col_widths=None, right_cols=None, stripe=True):
         right_cols = right_cols or []
-        all_rows = [[Paragraph(f"<b>{h}</b>", small_style) for h in headers]]
-        for row in rows:
+        all_rows = [[Paragraph(f'<font color="white"><b>{h}</b></font>', small_style)
+                     for h in headers]]
+        for i, row in enumerate(rows):
             all_rows.append([Paragraph(str(c), small_style) for c in row])
         tw = 7.0*inch
-        if col_widths is None:
-            col_widths = [tw / len(headers)] * len(headers)
+        col_widths = col_widths or [tw / len(headers)] * len(headers)
         t = Table(all_rows, colWidths=col_widths, repeatRows=1)
         style = [
-            ("BACKGROUND",    (0,0), (-1,0),  colors.black),
-            ("TEXTCOLOR",     (0,0), (-1,0),  colors.white),
+            ("BACKGROUND",    (0,0), (-1,0),  HEADER_BG),
             ("FONTNAME",      (0,0), (-1,0),  "Helvetica-Bold"),
             ("FONTSIZE",      (0,0), (-1,-1), 8),
-            ("ROWBACKGROUNDS",(0,1), (-1,-1), [colors.white, LIGHT_GRAY]),
-            ("GRID",          (0,0), (-1,-1), 0.3, RULE_COLOR),
-            ("LEFTPADDING",   (0,0), (-1,-1), 5),
-            ("RIGHTPADDING",  (0,0), (-1,-1), 5),
-            ("TOPPADDING",    (0,0), (-1,-1), 3),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+            ("GRID",          (0,0), (-1,-1), 0.25, RULE),
+            ("LEFTPADDING",   (0,0), (-1,-1), 6),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 6),
+            ("TOPPADDING",    (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ("VALIGN",        (0,0), (-1,-1), "MIDDLE"),
         ]
+        if stripe:
+            for i in range(1, len(all_rows)):
+                bg = colors.HexColor("#f0f4ff") if i % 2 == 0 else WHITE
+                style.append(("BACKGROUND", (0,i), (-1,i), bg))
         for col in right_cols:
             style.append(("ALIGN", (col,0), (col,-1), "RIGHT"))
         t.setStyle(TableStyle(style))
         return t
 
+    # ── Metric grid ───────────────────────────────────────────────────────────
+    def metric_grid(metrics):
+        """metrics = [(label, value, value_color), ...]  — renders 2-up grid"""
+        elements = []
+        for i in range(0, len(metrics), 2):
+            pair = metrics[i:i+2]
+            cells = []
+            for label, value, col in pair:
+                cells.append(Table(
+                    [[Paragraph(f'<font size="6.5" color="#6b7280">{label.upper()}</font>', body_style)],
+                     [Paragraph(f'<font size="15" color="{col}"><b>{value}</b></font>', body_style)]],
+                    colWidths=[3.35*inch],
+                ))
+            if len(cells) == 1:
+                cells.append(Paragraph("", body_style))
+            row_t = Table([cells], colWidths=[3.5*inch, 3.5*inch])
+            row_t.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0),(-1,-1), LIGHT),
+                ("BOX",           (0,0),(-1,-1), 0.5, RULE),
+                ("INNERGRID",     (0,0),(-1,-1), 0.5, RULE),
+                ("LEFTPADDING",   (0,0),(-1,-1), 10),
+                ("TOPPADDING",    (0,0),(-1,-1), 8),
+                ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+                ("VALIGN",        (0,0),(-1,-1), "TOP"),
+            ]))
+            elements.append(row_t)
+            elements.append(Spacer(1, 3))
+        return elements
+
     story = []
 
-    # ── COVER ─────────────────────────────────────────────────────────────────
-    story.append(Paragraph(d["committee_name"], title_style))
+    # ══════════════════════════════════════════════════════════════════════════
+    # COVER PAGE
+    # ══════════════════════════════════════════════════════════════════════════
+    # Dark header banner
+    banner_data = [[
+        Paragraph(d["committee_name"], cover_title),
+    ]]
+    banner = Table(banner_data, colWidths=[7.0*inch])
+    banner.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), NAVY),
+        ("LEFTPADDING",   (0,0),(-1,-1), 20),
+        ("RIGHTPADDING",  (0,0),(-1,-1), 20),
+        ("TOPPADDING",    (0,0),(-1,-1), 28),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 28),
+    ]))
+    story.append(banner)
+    story.append(Spacer(1, 6))
+
+    # Meta row
     meta_parts = []
     if d.get("filed_date"):      meta_parts.append(f"Filed: {d['filed_date']}")
     if d.get("political_party"): meta_parts.append(f"Party: {d['political_party']}")
-    if meta_parts:
-        story.append(Paragraph(" · ".join(meta_parts), meta_style))
+    meta_parts.append("Iowa Ethics & Campaign Disclosure Board — DR-2")
+    meta_row = Table([[Paragraph(" · ".join(meta_parts), caption_style)]],
+                     colWidths=[7.0*inch])
+    meta_row.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,-1), colors.HexColor("#e8edf5")),
+        ("LEFTPADDING",   (0,0),(-1,-1), 12),
+        ("TOPPADDING",    (0,0),(-1,-1), 6),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 6),
+    ]))
+    story.append(meta_row)
+    story.append(Spacer(1, 16))
 
-    # ── TOP LINES ─────────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # TOP LINES
+    # ══════════════════════════════════════════════════════════════════════════
     story += section_header("Top Lines")
-    burn_color = "#dc3545" if burn_rate > 80 else "#212529"
-    debt_color = "#dc3545" if debts > 0 else "#212529"
-    loans_color = "#0d6efd" if d.get("loans_received", 0) > 0 else "#212529"
-    metrics = [
-        ("Cash on Hand — Start of Period",              currency(d["cash_start"]),               "#212529"),
-        ("Cash on Hand — End of Period",                currency(d["cash_end"]),                 "#0d6efd"),
-        ("Receipts (Contributions + Loans + Sales)",    currency(receipts),                      "#198754"),
-        ("Loans Received",                              currency(d.get("loans_received", 0)),    loans_color),
-        ("Expenditures",                                currency(expenditures),                  "#dc3545"),
-        ("Number of Contributions (incl. loans)",       f"{n_contribs:,}",                       "#212529"),
-        ("Average Contribution",                        currency(avg_contrib),                   "#212529"),
-        ("Burn Rate",                                   pct(burn_rate),                          burn_color),
-        ("Debts",                                       currency(debts),                         debt_color),
-    ]
-    for i in range(0, len(metrics), 2):
-        pair = metrics[i:i+2]
-        row_data = []
-        for label, value, col in pair:
-            row_data.append(Paragraph(
-                f'<font size="7" color="#6c757d">{label.upper()}</font><br/>'
-                f'<font size="13" color="{col}"><b>{value}</b></font>',
-                body_style))
-        if len(row_data) == 1:
-            row_data.append(Paragraph("", body_style))
-        t = Table([row_data], colWidths=[3.5*inch, 3.5*inch])
-        t.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0),(-1,-1), LIGHT_GRAY),
-            ("BOX",           (0,0),(-1,-1), 0.5, RULE_COLOR),
-            ("INNERGRID",     (0,0),(-1,-1), 0.5, RULE_COLOR),
-            ("LEFTPADDING",   (0,0),(-1,-1), 10),
-            ("TOPPADDING",    (0,0),(-1,-1), 8),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 8),
-        ]))
-        story.append(t)
-        story.append(Spacer(1, 3))
 
-    # ── CONTRIBUTIONS ─────────────────────────────────────────────────────────
+    burn_color = "#dc2626" if burn_rate > 80 else "#16a34a"
+    debt_color = "#dc2626" if debts > 0 else "#111827"
+    loans_color = "#2563eb" if d.get("loans_received", 0) > 0 else "#111827"
+
+    story += metric_grid([
+        ("Cash on Hand — Start of Period",                 currency(d["cash_start"]),             "#111827"),
+        ("Cash on Hand — End of Period",                   currency(d["cash_end"]),                "#2563eb"),
+        ("Total Receipts (Contributions + Loans + Sales)", currency(receipts),                    "#16a34a"),
+        ("Expenditures",                                   currency(expenditures),                 "#dc2626"),
+        ("Loans Received",                                 currency(d.get("loans_received", 0)),  loans_color),
+        ("Debts",                                          currency(debts),                        debt_color),
+        ("Number of Contributions (incl. loans)",          f"{n_contribs:,}",                     "#111827"),
+        ("Average Contribution",                           currency(avg_contrib),                 "#111827"),
+        ("Burn Rate",                                      pct(burn_rate),                        burn_color),
+        ("",                                               "",                                    "#111827"),
+    ])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CONTRIBUTIONS
+    # ══════════════════════════════════════════════════════════════════════════
     story.append(PageBreak())
     story += section_header("Contributions Summary")
 
@@ -153,6 +221,7 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
                  .rename(columns={"name":"Contributor","amount":"Total"})
                  .sort_values("Total", ascending=False))
 
+        # Top donors
         story.append(Paragraph("Top Donors ($10,000+)", sub_style))
         top = pivot[pivot["Total"] >= 10_000]
         if top.empty:
@@ -161,136 +230,80 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
             rows = [(r["Contributor"], currency(r["Total"])) for _, r in top.iterrows()]
             story.append(data_table(["Contributor","Total"],
                                     rows, [5.0*inch, 2.0*inch], right_cols=[1]))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 12))
 
+        # Notable donors with notes
         story.append(Paragraph("Other Notable Donors", sub_style))
         eligible = pivot[(pivot["Total"] < 10_000) &
                          (~pivot["Contributor"].isin(["Unitemized","Unknown"]))]
         notable = (pd.concat([eligible.head(10), eligible[eligible["Total"] >= 1_000]])
                    .drop_duplicates("Contributor").sort_values("Total", ascending=False))
+
         if notable.empty:
             story.append(Paragraph("No additional notable donors.", body_style))
         else:
-            # Merge in any notes from the editable table
             if notes_df is not None and not notes_df.empty:
-                notes_lookup = dict(zip(notes_df["Name"], notes_df.get("Notes", [""] * len(notes_df))))
+                notes_lookup = dict(zip(notes_df["Name"].astype(str),
+                                        notes_df.get("Notes", pd.Series([""] * len(notes_df))).fillna("")))
             else:
                 notes_lookup = {}
 
             def make_note_cell(name):
-                """Return a Paragraph with clickable hyperlinks for PDF export.
-                Supports [link text](https://url) and bare https:// URLs."""
                 import re as _re
                 note = notes_lookup.get(name, "")
                 if not note:
                     return Paragraph("", small_style)
 
-                # Process markdown links: [text](url) -> <link href="url">text</link>
                 def md_link_replace(m):
                     txt, url = m.group(1), m.group(2)
-                    return '<link href="' + url + '"><font color="#0d6efd"><u>' + txt + '</u></font></link>'
+                    return '<link href="' + url + '"><font color="#2563eb"><u>' + txt + '</u></font></link>'
 
-                note_html = _re.sub(
-                    r'\[([^\]]+)\]\((https?://[^\)]+)\)',
-                    md_link_replace,
-                    note
-                )
-
-                # Process bare URLs not inside an existing link tag
                 def bare_url_replace(m):
                     url = m.group(1)
-                    return '<link href="' + url + '"><font color="#0d6efd"><u>' + url + '</u></font></link>'
+                    return '<link href="' + url + '"><font color="#2563eb"><u>' + url + '</u></font></link>'
 
-                note_html = _re.sub(
-                    r'(?<!["\(])(https?://[^\s<>"\)]+)',
-                    bare_url_replace,
-                    note_html
-                )
-
+                note_html = _re.sub(r'\[([^\]]+)\]\((https?://[^\)]+)\)', md_link_replace, note)
+                note_html = _re.sub(r'(?<!["\(])(https?://[^\s<>"]+)', bare_url_replace, note_html)
                 return Paragraph(note_html, small_style)
 
-                        # Build table with notes column
             has_notes = any(notes_lookup.get(r["Contributor"], "") for _, r in notable.iterrows())
             if has_notes:
-                headers = ["Contributor", "Total", "Notes"]
-                col_w   = [2.5*inch, 1.3*inch, 3.2*inch]
-                all_rows = [[Paragraph(f"<b>{h}</b>", small_style) for h in headers]]
+                hdrs  = ["Contributor","Total","Notes"]
+                cw    = [2.4*inch, 1.3*inch, 3.3*inch]
+                rows2 = [[Paragraph(f'<font color="white"><b>{h}</b></font>', small_style) for h in hdrs]]
                 for _, r in notable.iterrows():
-                    all_rows.append([
-                        Paragraph(str(r["Contributor"]), small_style),
-                        Paragraph(currency(r["Total"]), small_style),
-                        make_note_cell(r["Contributor"]),
-                    ])
+                    rows2.append([Paragraph(str(r["Contributor"]), small_style),
+                                  Paragraph(currency(r["Total"]), small_style),
+                                  make_note_cell(r["Contributor"])])
             else:
-                headers = ["Contributor", "Total"]
-                col_w   = [5.0*inch, 2.0*inch]
-                all_rows = [[Paragraph(f"<b>{h}</b>", small_style) for h in headers]]
+                hdrs  = ["Contributor","Total"]
+                cw    = [5.0*inch, 2.0*inch]
+                rows2 = [[Paragraph(f'<font color="white"><b>{h}</b></font>', small_style) for h in hdrs]]
                 for _, r in notable.iterrows():
-                    all_rows.append([
-                        Paragraph(str(r["Contributor"]), small_style),
-                        Paragraph(currency(r["Total"]), small_style),
-                    ])
+                    rows2.append([Paragraph(str(r["Contributor"]), small_style),
+                                  Paragraph(currency(r["Total"]), small_style)])
 
-            IOWA_BLUE  = colors.HexColor("#0d6efd")
-            LIGHT_GRAY = colors.HexColor("#f8f9fa")
-            RULE_COLOR = colors.HexColor("#dee2e6")
-            t = Table(all_rows, colWidths=col_w, repeatRows=1)
-            t.setStyle(TableStyle([
-                ("BACKGROUND",    (0,0), (-1,0),  colors.black),
-                ("TEXTCOLOR",     (0,0), (-1,0),  colors.white),
-                ("FONTNAME",      (0,0), (-1,0),  "Helvetica-Bold"),
+            t2 = Table(rows2, colWidths=cw, repeatRows=1)
+            t2_style = [
+                ("BACKGROUND",    (0,0), (-1,0),  HEADER_BG),
                 ("FONTSIZE",      (0,0), (-1,-1), 8),
-                ("ROWBACKGROUNDS",(0,1), (-1,-1), [colors.white, LIGHT_GRAY]),
-                ("GRID",          (0,0), (-1,-1), 0.3, RULE_COLOR),
-                ("LEFTPADDING",   (0,0), (-1,-1), 5),
-                ("RIGHTPADDING",  (0,0), (-1,-1), 5),
-                ("TOPPADDING",    (0,0), (-1,-1), 3),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
-                ("ALIGN",         (1,0), (1,-1),  "RIGHT"),
+                ("GRID",          (0,0), (-1,-1), 0.25, RULE),
+                ("LEFTPADDING",   (0,0), (-1,-1), 6),
+                ("RIGHTPADDING",  (0,0), (-1,-1), 6),
+                ("TOPPADDING",    (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
                 ("VALIGN",        (0,0), (-1,-1), "TOP"),
-            ]))
-            story.append(t)
+                ("ALIGN",         (1,0), (1,-1),  "RIGHT"),
+            ]
+            for i in range(1, len(rows2)):
+                bg = colors.HexColor("#f0f4ff") if i % 2 == 0 else WHITE
+                t2_style.append(("BACKGROUND", (0,i), (-1,i), bg))
+            t2.setStyle(TableStyle(t2_style))
+            story.append(t2)
 
-    # ── LOANS RECEIVED ────────────────────────────────────────────────────────
-    if loans and d.get("loans_received", 0) > 0:
-        story.append(Spacer(1, 8))
-        story += section_header("Loans Received")
-
-        # Summary row
-        loans_summary = [
-            ("Total Loans Received This Period", currency(d.get("loans_received", 0))),
-            ("Outstanding Loans End of Period",  currency(d.get("outstanding_loans", 0))),
-        ]
-        summary_data = [[
-            Paragraph(
-                f'<font size="7" color="#6c757d">{lbl.upper()}</font><br/>'
-                f'<font size="11" color="#0d6efd"><b>{val}</b></font>',
-                body_style)
-            for lbl, val in loans_summary
-        ]]
-        ls_t = Table(summary_data, colWidths=[3.5*inch, 3.5*inch])
-        ls_t.setStyle(TableStyle([
-            ("BACKGROUND",    (0,0),(-1,-1), LIGHT_GRAY),
-            ("BOX",           (0,0),(-1,-1), 0.5, RULE_COLOR),
-            ("INNERGRID",     (0,0),(-1,-1), 0.5, RULE_COLOR),
-            ("LEFTPADDING",   (0,0),(-1,-1), 10),
-            ("TOPPADDING",    (0,0),(-1,-1), 8),
-            ("BOTTOMPADDING", (0,0),(-1,-1), 8),
-        ]))
-        story.append(ls_t)
-        story.append(Spacer(1, 8))
-
-        # Loan detail table
-        loan_rows = [(currency(l["amount"]), l["name"], l.get("relationship",""), l["date"])
-                     for l in loans]
-        story.append(data_table(
-            ["Amount", "Lender", "Relationship", "Date"],
-            loan_rows,
-            [1.4*inch, 3.0*inch, 1.2*inch, 1.4*inch],
-            right_cols=[0]
-        ))
-
-    # ── EXPENDITURES ──────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # EXPENDITURES
+    # ══════════════════════════════════════════════════════════════════════════
     story.append(PageBreak())
     story += section_header("Expenditures Summary")
 
@@ -298,13 +311,28 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
                  .rename(columns={"eff_cat":"Category","amount":"Total"})
                  .sort_values("Total", ascending=False))
 
-    for idx, cat_row in exp_pivot.iterrows():
+    for _, cat_row in exp_pivot.iterrows():
         cat   = cat_row["Category"]
         total = cat_row["Total"]
         items = (exp_df_with_cats[exp_df_with_cats["eff_cat"] == cat]
                  .sort_values("amount", ascending=False))
 
-        story.append(Paragraph(f"<b>{cat}</b> — {currency(total)}", sub_style))
+        # Category header bar
+        cat_banner = Table(
+            [[Paragraph(f'<font color="white"><b>{cat}</b></font>',
+                        ParagraphStyle("ch", parent=small_style, fontSize=9)),
+              Paragraph(f'<font color="white"><b>{currency(total)}</b></font>',
+                        ParagraphStyle("cv", parent=small_style, fontSize=9))]],
+            colWidths=[5.0*inch, 2.0*inch])
+        cat_banner.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,-1), colors.HexColor("#2d4a7a")),
+            ("LEFTPADDING",   (0,0),(-1,-1), 8),
+            ("RIGHTPADDING",  (0,0),(-1,-1), 8),
+            ("TOPPADDING",    (0,0),(-1,-1), 5),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+            ("ALIGN",         (1,0),(1,-1),  "RIGHT"),
+        ]))
+        story.append(KeepTogether([cat_banner]))
 
         big = items[items["amount"] >= 1000]
         if not big.empty:
@@ -312,180 +340,165 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
             story.append(data_table(["Amount","Payee","Date"],
                                     rows, [1.4*inch, 3.8*inch, 1.8*inch], right_cols=[0]))
 
-        small = items[items["amount"] < 1000]
-        if not small.empty:
-            n, tot = len(small), small["amount"].sum()
+        small_items = items[items["amount"] < 1000]
+        if not small_items.empty:
+            n, tot = len(small_items), small_items["amount"].sum()
             story.append(Paragraph(
-                f'<i>{n} smaller expense{"s" if n!=1 else ""} totalling {currency(tot)}</i>',
-                small_style))
-        story.append(Spacer(1, 6))
+                f'<i><font color="#6b7280">{n} smaller expense{"s" if n!=1 else ""}'
+                f' totalling {currency(tot)}</font></i>',
+                caption_style))
+        story.append(Spacer(1, 5))
 
-    # ── GEO SUMMARY ───────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # GEOGRAPHIC SUMMARY
+    # ══════════════════════════════════════════════════════════════════════════
     story.append(PageBreak())
-    story += section_header("Geographic Summary — Contributions by State")
+    story += section_header("Geographic Analysis")
 
-    if contributions:
-        cdf = pd.DataFrame(contributions)
+    map_img_bytes  = None
+    iowa_img_bytes = None
 
-        # Try to render map image via plotly + kaleido
-        map_img_bytes = None
-        iowa_img_bytes = None
-        try:
-            import plotly.graph_objects as go
+    try:
+        import plotly.graph_objects as go
+        import plotly.io as _pio
 
-            geo_rows = []
-            unique_zips_pdf = [c["zipcode"] for c in contributions
-                               if c["name"] not in ("Unitemized","Unknown") and c.get("zipcode")]
-            zip_coords_pdf = batch_geocode(unique_zips_pdf)
-            for c in contributions:
-                if c["name"] in ("Unitemized","Unknown") or not c.get("zipcode"):
-                    continue
-                coords = zip_coords_pdf.get(str(c["zipcode"]).zfill(5))
-                if coords:
-                    geo_rows.append({**c, "lat": coords[0], "lon": coords[1]})
+        geo_rows = []
+        unique_zips_pdf = [c["zipcode"] for c in contributions
+                           if c["name"] not in ("Unitemized","Unknown") and c.get("zipcode")]
+        zip_coords_pdf = batch_geocode(unique_zips_pdf)
+        for c in contributions:
+            if c["name"] in ("Unitemized","Unknown") or not c.get("zipcode"):
+                continue
+            coords = zip_coords_pdf.get(str(c["zipcode"]).zfill(5))
+            if coords:
+                geo_rows.append({**c, "lat": coords[0], "lon": coords[1]})
 
-            if geo_rows:
-                gdf = pd.DataFrame(geo_rows)
-                map_df = (gdf.groupby(["zipcode","lat","lon","state"])
-                          .agg(total=("amount","sum"), count=("amount","count"))
-                          .reset_index())
-                mx = map_df["total"].max()
-                map_df["size"] = map_df["total"].apply(lambda v: 5 + (v/mx)*12)
+        if geo_rows:
+            gdf     = pd.DataFrame(geo_rows)
+            map_df  = (gdf.groupby(["zipcode","lat","lon","state"])
+                       .agg(total=("amount","sum"), count=("amount","count"))
+                       .reset_index())
+            mx      = map_df["total"].max()
+            map_df["size"] = map_df["total"].apply(lambda v: 5 + (v/mx)*12)
 
-                def _make_map_fig(city_labels, lon_range, lat_range, height, width,
-                                  title_text=None, proj_scale=1.0, proj_center=None):
-                    """Build a Plotly geo figure for PDF export."""
-                    fig = go.Figure()
+            def _make_map_fig(city_labels, height, width, title_text=None,
+                              proj_scale=1.0, proj_center=None,
+                              lon_range=None, lat_range=None):
+                fig = go.Figure()
+                fig.add_trace(go.Scattergeo(
+                    lat=map_df["lat"], lon=map_df["lon"],
+                    text=map_df.apply(
+                        lambda r: (f"ZIP: {r['zipcode']}<br>State: {r['state']}<br>"
+                                   f"Total: {currency(r['total'])}"), axis=1),
+                    hoverinfo="text", mode="markers",
+                    marker=dict(
+                        size=map_df["size"], color=map_df["total"],
+                        colorscale=[[0,"#bbf7d0"],[0.4,"#4ade80"],[0.7,"#16a34a"],[1,"#14532d"]],
+                        cmin=map_df["total"].min(), cmax=mx,
+                        colorbar=dict(title=dict(text="$", side="right"),
+                                      thickness=10, len=0.5),
+                        line=dict(width=0.5, color="white"), opacity=0.9,
+                    ),
+                ))
+                if city_labels:
                     fig.add_trace(go.Scattergeo(
-                        lat=map_df["lat"], lon=map_df["lon"],
-                        text=map_df.apply(
-                            lambda r: f"ZIP: {r['zipcode']}<br>State: {r['state']}<br>"
-                                      f"Total: {currency(r['total'])}", axis=1),
-                        hoverinfo="text", mode="markers",
-                        marker=dict(
-                            size=map_df["size"], color=map_df["total"],
-                            colorscale=[[0,"#c8e6c9"],[0.4,"#66bb6a"],[0.7,"#2e7d32"],[1,"#1b5e20"]],
-                            cmin=map_df["total"].min(), cmax=mx,
-                            colorbar=dict(title=dict(text="$",side="right"), thickness=10, len=0.5),
-                            line=dict(width=0.5, color="white"), opacity=0.88,
-                        ),
+                        lat=[c[1] for c in city_labels],
+                        lon=[c[2] for c in city_labels],
+                        text=[c[0] for c in city_labels],
+                        mode="text",
+                        textfont=dict(size=7, color="#1a2744"),
+                        hoverinfo="skip", showlegend=False,
                     ))
-                    if city_labels:
-                        fig.add_trace(go.Scattergeo(
-                            lat=[c[1] for c in city_labels],
-                            lon=[c[2] for c in city_labels],
-                            text=[c[0] for c in city_labels],
-                            mode="text",
-                            textfont=dict(size=7, color="#000000"),
-                            hoverinfo="skip", showlegend=False,
-                        ))
-                    geo_dict = dict(
-                        scope="usa", projection_type="albers usa",
-                        showland=True, landcolor="#f5f5f5",
-                        showlakes=True, lakecolor="#d4eaf7",
-                        showrivers=True, rivercolor="#d4eaf7",
-                        subunitcolor="#cccccc", subunitwidth=0.8,
-                        bgcolor="white",
-                        projection=dict(scale=proj_scale),
-                    )
-                    if proj_center:
-                        geo_dict["center"] = proj_center
-                    fig.update_layout(
-                        geo=geo_dict,
-                        title=dict(text=title_text, x=0.5, font=dict(size=11)) if title_text else None,
-                        margin=dict(l=0, r=0, t=30 if title_text else 10, b=0),
-                        height=height, width=width,
-                        paper_bgcolor="white",
-                    )
-                    return fig
-
-                # National labels: only Des Moines from Iowa, plus major US cities
-                IOWA_CITY_NAMES = {"Des Moines","Cedar Rapids","Davenport",
-                                   "Sioux City","Iowa City","Waterloo","Dubuque"}
-                national_labels = [c for c in MAJOR_CITIES if c[0] not in
-                                   (IOWA_CITY_NAMES - {"Des Moines"})]
-                iowa_labels = [c for c in MAJOR_CITIES if c[0] in IOWA_CITY_NAMES]
-
-                # Full US map — use projection center, not lat/lon range
-                fig_us = _make_map_fig(
-                    city_labels=national_labels,
-                    lon_range=[-124, -68], lat_range=[23, 50],
-                    height=340, width=720,
-                    title_text="Contributions — National View",
+                geo_dict = dict(
+                    scope="usa", projection_type="albers usa",
+                    showland=True, landcolor="#f8fafc",
+                    showlakes=True, lakecolor="#dbeafe",
+                    showrivers=True, rivercolor="#dbeafe",
+                    subunitcolor="#d1d5db", subunitwidth=0.8,
+                    countrycolor="#9ca3af", bgcolor="white",
+                    projection=dict(scale=proj_scale),
                 )
-                buf_us = io.BytesIO()
-                fig_us.write_image(buf_us, format="png", scale=2)
-                map_img_bytes = buf_us.getvalue()
-
-                # Iowa zoomed map — use projection scale+center rather than ranges
-                # scale=4 zooms in ~4x on Iowa; center puts Iowa in the middle
-                fig_ia = _make_map_fig(
-                    city_labels=iowa_labels,
-                    lon_range=[-96.8, -90.1], lat_range=[40.4, 43.6],
-                    height=340, width=720,
-                    title_text="Contributions — Iowa Detail",
-                    proj_scale=4.0,
-                    proj_center=dict(lat=42.0, lon=-93.5),
+                if proj_center:
+                    geo_dict["center"] = proj_center
+                if lon_range:
+                    geo_dict["lonaxis"] = dict(range=lon_range)
+                if lat_range:
+                    geo_dict["lataxis"] = dict(range=lat_range)
+                fig.update_layout(
+                    geo=geo_dict,
+                    title=dict(text=f"<b>{title_text}</b>", x=0.5,
+                               font=dict(size=11, color="#1a2744")) if title_text else None,
+                    margin=dict(l=0, r=0, t=30 if title_text else 8, b=0),
+                    height=height, width=width,
+                    paper_bgcolor="white",
                 )
-                buf_ia = io.BytesIO()
-                fig_ia.write_image(buf_ia, format="png", scale=2)
-                iowa_img_bytes = buf_ia.getvalue()
-        except Exception as _kaleido_err:
-            pass  # kaleido not installed or geocoder unavailable — skip map image
+                return fig
 
-        if map_img_bytes:
-            story.append(RLImage(io.BytesIO(map_img_bytes), width=7.0*inch, height=3.3*inch))
-            story.append(Spacer(1, 6))
-        if 'iowa_img_bytes' in dir() and iowa_img_bytes:
-            story.append(RLImage(io.BytesIO(iowa_img_bytes), width=7.0*inch, height=3.3*inch))
-            story.append(Spacer(1, 8))
+            IOWA_CITY_NAMES = {"Des Moines","Cedar Rapids","Davenport",
+                               "Sioux City","Iowa City","Waterloo","Dubuque"}
+            national_labels = [c for c in MAJOR_CITIES
+                               if c[0] not in (IOWA_CITY_NAMES - {"Des Moines"})]
+            iowa_labels     = [c for c in MAJOR_CITIES if c[0] in IOWA_CITY_NAMES]
 
-        # By-state table
-        state_df = (cdf[~cdf["state"].isin(["","Unknown"])]
+            fig_us = _make_map_fig(
+                city_labels=national_labels,
+                lon_range=[-124, -68], lat_range=[23, 50],
+                height=330, width=700,
+                title_text="Contributions — National View",
+            )
+            map_img_bytes = _pio.to_image(fig_us, format="png", scale=2, engine="kaleido")
+
+            fig_ia = _make_map_fig(
+                city_labels=iowa_labels,
+                height=330, width=700,
+                title_text="Contributions — Iowa Detail",
+                proj_scale=4.0,
+                proj_center=dict(lat=42.0, lon=-93.5),
+            )
+            iowa_img_bytes = _pio.to_image(fig_ia, format="png", scale=2, engine="kaleido")
+
+    except Exception:
+        pass
+
+    if map_img_bytes:
+        story.append(RLImage(io.BytesIO(map_img_bytes), width=7.0*inch, height=3.2*inch))
+        story.append(Spacer(1, 8))
+    if iowa_img_bytes:
+        story.append(RLImage(io.BytesIO(iowa_img_bytes), width=7.0*inch, height=3.2*inch))
+        story.append(Spacer(1, 10))
+
+    if not map_img_bytes:
+        story.append(Paragraph(
+            "Map images unavailable — install kaleido and pgeocode to include them.",
+            caption_style))
+
+    # By-state table
+    story.append(Paragraph("Contributions by State (>1% of cash contributions)", sub_style))
+    story.append(Paragraph("Loans excluded from percentage calculation.", caption_style))
+    if contributions:
+        cdf_pdf = pd.DataFrame(contributions)
+        state_df = (cdf_pdf[~cdf_pdf["state"].isin(["","Unknown","Unitemized"])]
                     .groupby("state")["amount"].sum().reset_index()
                     .rename(columns={"state":"State","amount":"Amount"})
                     .sort_values("Amount", ascending=False))
+        state_counts_pdf = (cdf_pdf[~cdf_pdf["state"].isin(["","Unknown","Unitemized"])]
+                            .groupby("state")["amount"].count().reset_index()
+                            .rename(columns={"state":"State","amount":"# Contributions"}))
+        state_df = state_df.merge(state_counts_pdf, on="State", how="left")
+        _cash_contribs_pdf = d.get("cash_contributions", receipts)
+        state_df["% of Contributions"] = (state_df["Amount"]/_cash_contribs_pdf*100).apply(pct)
+        state_df = state_df[state_df["Amount"] / _cash_contribs_pdf * 100 > 1.0]
         if not state_df.empty:
-            cdf_pdf = pd.DataFrame(contributions)
-            state_counts_pdf = (cdf_pdf[~cdf_pdf["state"].isin(["","Unknown","Unitemized"])]
-                                .groupby("state")["amount"].count().reset_index()
-                                .rename(columns={"state":"State","amount":"# Contributions"}))
-            state_df = state_df.merge(state_counts_pdf, on="State", how="left")
-            state_df["% of Contributions"] = (state_df["Amount"]/receipts*100).apply(pct)
-            state_df = state_df.head(10)
-            rows = [(r["State"], int(r["# Contributions"]), currency(r["Amount"]), r["% of Contributions"])
+            rows = [(r["State"], int(r["# Contributions"]),
+                     currency(r["Amount"]), r["% of Contributions"])
                     for _, r in state_df.iterrows()]
             story.append(data_table(
                 ["State","# Contributions","Amount","% of Contributions"],
-                rows, [1.0*inch, 1.5*inch, 2.5*inch, 2.0*inch], right_cols=[1,2,3]))
-
-        if not map_img_bytes:
-            story.append(Spacer(1,6))
-            story.append(Paragraph(
-                "Map image unavailable — install kaleido (`pip install kaleido`) to include it.",
-                small_style))
+                rows, [1.1*inch, 1.6*inch, 2.4*inch, 1.9*inch], right_cols=[1,2,3]))
 
     doc.build(story)
     return buf.getvalue()
 
-st.set_page_config(page_title="Iowa Campaign Finance Viewer", page_icon="🗳️", layout="wide")
-
-st.markdown("""
-<style>
-    .metric-card { background:#f8f9fa; border:1px solid #dee2e6; border-radius:8px;
-                   padding:16px 20px; margin-bottom:10px; }
-    .metric-label { font-size:0.75rem; color:#6c757d; text-transform:uppercase;
-                    letter-spacing:0.06em; margin-bottom:4px; }
-    .metric-value        { font-size:1.5rem; font-weight:700; color:#212529; }
-    .metric-value.green  { color:#198754; }
-    .metric-value.red    { color:#dc3545; }
-    .metric-value.blue   { color:#0d6efd; }
-    .section-header { font-size:1.05rem; font-weight:600; color:#343a40;
-                      border-bottom:2px solid #dee2e6; padding-bottom:6px; margin:28px 0 14px; }
-    .committee-title { font-size:1.9rem; font-weight:700; color:#212529; margin-bottom:2px; }
-    .report-meta { font-size:0.85rem; color:#6c757d; }
-</style>
-""", unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -621,7 +634,7 @@ def extract_lines(pdf_bytes):
 def parse_summary_fields(lines):
     d = {"committee_name":"","report_date":"","filed_date":"","political_party":"",
          "cash_start":0.0,"cash_contributions":0.0,"loans_received":0.0,
-         "property_sales":0.0,"receipts":0.0,"expenditures":0.0,"cash_end":0.0,
+         "property_sales":0.0,"expenditures":0.0,"cash_end":0.0,
          "unpaid_bills":0.0,"outstanding_loans":0.0}
     for i, line in enumerate(lines):
         s = line.strip()
@@ -650,8 +663,6 @@ def parse_summary_fields(lines):
             ("Schedule F2: Outstanding Loans","outstanding_loans"),
         ]:
             if label.lower() in s.lower(): d[key] = parse_money(s)
-    # Composite receipts = cash contributions + loans received + property sales
-    d["receipts"] = d["cash_contributions"] + d["loans_received"] + d["property_sales"]
     return d
 
 def parse_contributions(lines):
@@ -701,83 +712,6 @@ def parse_contributions(lines):
         contribs.append({"date":date,"name":name,"state":state,"zipcode":zipcode,"amount":amount})
     return contribs
 
-def parse_loans(lines):
-    """
-    Parse Schedule F1: Loans Received.
-
-    The table layout (from actual PDF x-positions) is:
-      Col 1 — Date Incurred     x ≈ 38
-      Col 2 — Name / Address    x ≈ 102  (lender name appears one line above the date row)
-      Col 3 — Relationship      x ≈ 302
-      Col 4 — Amount of Loan    x ≈ 518
-
-    A single entry looks like (in extracted text order):
-        Lahn, Zach                     ← name line (no date on this line)
-        5/22/2026  PO Box 129  Self  $500,000.00
-        Belle Plaine IA 52208          ← city/state line
-    """
-    loans = []
-    in_section = False
-    i = 0
-    while i < len(lines):
-        s = lines[i].strip()
-
-        # Section boundaries — must match the actual schedule header (has "Sch-F1"),
-        # NOT the summary line "Schedule F1: Loans Received Total $X"
-        if "Schedule F1: Loans Received" in s and "Sch-F1" in s:
-            in_section = True; i += 1; continue
-        if in_section and re.match(
-                r"^(Total Received|Total Unpaid|Total Loans Paid|Total Forgiven|"
-                r"Total Outstanding|Schedule F2:|Schedule B:|Schedule G:|Schedule D:)", s):
-            break
-        if not in_section or is_skip(s): i += 1; continue
-
-        # A data row starts with a date followed by address text and ends with $amount
-        # Pattern: DATE  <address words>  [RELATIONSHIP]  $AMOUNT
-        date_m = re.match(r"^(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+\$([\d,]+\.\d{2})\s*$", s)
-        if date_m:
-            date      = date_m.group(1)
-            mid_text  = date_m.group(2).strip()
-            amount    = float(date_m.group(3).replace(",", ""))
-
-            # Relationship keyword typically ends the mid_text
-            relationship = ""
-            rel_m = re.search(r"\b(Self|Spouse|Family|PAC|Other)\b", mid_text, re.I)
-            if rel_m:
-                relationship = rel_m.group(1)
-
-            # Name is on the line immediately before the date row
-            # (walk back skipping blank / header lines)
-            name = ""
-            for k in range(i - 1, max(i - 6, -1), -1):
-                cand = lines[k].strip()
-                if not cand or is_skip(cand): continue
-                # Stop if we hit another data row or a section header
-                if re.match(r"^(\d{1,2}/\d{1,2}/\d{4})", cand): break
-                if CITY_LINE_RE.match(cand): continue
-                if is_purpose(cand): continue
-                # This should be the lender name
-                name = cand
-                break
-
-            # State / zip from the city line after the date row
-            state = zipcode = ""
-            if i + 1 < len(lines):
-                m2 = re.search(r",?\s+([A-Z]{2})\s+(\d{5})", lines[i + 1])
-                if m2:
-                    state, zipcode = m2.group(1), m2.group(2)
-
-            loans.append({
-                "date":         date,
-                "name":         name or "Unknown",
-                "relationship": relationship,
-                "state":        state,
-                "zipcode":      zipcode,
-                "amount":       amount,
-            })
-        i += 1
-    return loans
-
 def parse_expenditures(lines):
     exp_list = []
     in_section = False
@@ -823,9 +757,13 @@ def parse_expenditures(lines):
 
 def parse_disclosure(pdf_bytes):
     lines = extract_lines(pdf_bytes)
-    return {**parse_summary_fields(lines),
+    summary = parse_summary_fields(lines)
+    # Receipts = cash contributions + loans received + property sales
+    summary["receipts"] = (summary["cash_contributions"]
+                           + summary["loans_received"]
+                           + summary["property_sales"])
+    return {**summary,
             "contributions":     parse_contributions(lines),
-            "loans":             parse_loans(lines),
             "expenditures_list": parse_expenditures(lines)}
 
 
@@ -869,12 +807,11 @@ if st.session_state.get("file_id") != file_id:
 
 d             = st.session_state["disclosure"]
 contributions = d["contributions"]
-loans         = d.get("loans", [])
 exp_list      = d["expenditures_list"]
-receipts      = d["receipts"]          # cash contributions + loans received + property sales
+receipts      = d["receipts"]
 expenditures  = d["expenditures"]
 debts         = d["unpaid_bills"] + d["outstanding_loans"]
-n_contribs    = len(contributions) + len(loans)   # includes loans
+n_contribs    = len(contributions)
 itemized      = [c for c in contributions if c["name"] not in ("Unitemized","Unknown")]
 avg_contrib   = receipts / n_contribs if n_contribs else 0.0
 burn_rate     = (expenditures / receipts * 100) if receipts else 0.0
@@ -894,8 +831,8 @@ st.markdown('<div class="section-header">📊 Top Lines</div>', unsafe_allow_htm
 c1, c2, c3 = st.columns(3)
 with c1:
     st.markdown(metric_card("Cash on Hand at Start of Period", fmt_cur(d["cash_start"])), unsafe_allow_html=True)
-    st.markdown(metric_card("Receipts (Contributions + Loans + Sales)", fmt_cur(receipts), "green"), unsafe_allow_html=True)
-    st.markdown(metric_card("Number of Contributions (including loans)", f"{n_contribs:,}"), unsafe_allow_html=True)
+    st.markdown(metric_card("Total Receipts (Contributions + Loans + Property Sales)", fmt_cur(receipts), "green"), unsafe_allow_html=True)
+    st.markdown(metric_card("Number of Contributions (incl. loans)", f"{n_contribs:,}"), unsafe_allow_html=True)
 with c2:
     st.markdown(metric_card("Cash on Hand (End of Period)", fmt_cur(d["cash_end"]), "blue"), unsafe_allow_html=True)
     st.markdown(metric_card("Expenditures", fmt_cur(expenditures), "red"), unsafe_allow_html=True)
@@ -953,27 +890,6 @@ if contributions:
                    }, hide_index=False, key="notable_donors")
 else:
     st.warning("No contribution data could be parsed.")
-
-
-# ── Loans Received ────────────────────────────────────────────────────────────
-if loans or d.get("loans_received", 0) > 0:
-    st.markdown('<div class="section-header">🏦 Loans Received</div>', unsafe_allow_html=True)
-    lc1, lc2 = st.columns(2)
-    with lc1:
-        st.markdown(metric_card("Total Loans Received This Period", fmt_cur(d["loans_received"]), "blue"), unsafe_allow_html=True)
-    with lc2:
-        st.markdown(metric_card("Outstanding Loans End of Period", fmt_cur(d["outstanding_loans"]), "red" if d["outstanding_loans"] > 0 else ""), unsafe_allow_html=True)
-
-    if loans:
-        loans_df = pd.DataFrame(loans)
-        loans_df["amount_fmt"] = loans_df["amount"].apply(fmt_cur)
-        display_loans = loans_df[["date","name","relationship","amount_fmt"]].rename(columns={
-            "date":"Date","name":"Lender","relationship":"Relationship","amount_fmt":"Amount"
-        })
-        st.dataframe(display_loans.reset_index(drop=True), use_container_width=True, hide_index=True)
-    else:
-        st.info(f"Loan total of {fmt_cur(d['loans_received'])} found in summary. "
-                "No individual loan line items were parsed from Schedule F1.")
 
 
 # ── Expenditures ──────────────────────────────────────────────────────────────
@@ -1201,12 +1117,14 @@ try:
                             .rename(columns={"state":"State","amount":"# Contributions"}))
             state_df = state_df.merge(state_counts, on="State", how="left")
             # Filter to states representing >1% of contributions
-            state_df = state_df[state_df["Amount"] / receipts * 100 > 1.0]
-            state_df["% of Contributions"] = (state_df["Amount"]/receipts*100).apply(fmt_pct)
+            _cash_contribs = d["cash_contributions"]
+            state_df = state_df[state_df["Amount"] / _cash_contribs * 100 > 1.0]
+            state_df["% of Contributions"] = (state_df["Amount"]/_cash_contribs*100).apply(fmt_pct)
             state_df["Amount"] = state_df["Amount"].apply(fmt_cur)
             state_df = state_df[["State","# Contributions","Amount","% of Contributions"]]
+            st.caption("_% calculated against cash contributions only — loans excluded._")
             st.dataframe(state_df.reset_index(drop=True), use_container_width=True, hide_index=True)
-            unmapped = receipts - total_mapped
+            unmapped = _cash_contribs - total_mapped
             if unmapped > 0.01:
                 st.caption(f"Note: {fmt_cur(unmapped)} ({unmapped/receipts*100:.1f}%) "
                            f"not mapped — unitemized or missing address.")
@@ -1261,7 +1179,6 @@ if st.button("Generate PDF Report", type="primary"):
                 n_contribs=n_contribs,
                 avg_contrib=avg_contrib,
                 burn_rate=burn_rate,
-                loans=loans,
                 notes_df=notes_df,
             )
             safe_name = re.sub(r"[^\w\s-]", "", d["committee_name"]).strip().replace(" ", "_")
