@@ -31,7 +31,7 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
 
 def build_pdf_report(d, contributions, exp_df_with_cats,
                      receipts, expenditures, debts, n_contribs, avg_contrib, burn_rate,
-                     notes_df=None):
+                     loans=None, notes_df=None):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
@@ -109,15 +109,17 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
     story += section_header("Top Lines")
     burn_color = "#dc3545" if burn_rate > 80 else "#212529"
     debt_color = "#dc3545" if debts > 0 else "#212529"
+    loans_color = "#0d6efd" if d.get("loans_received", 0) > 0 else "#212529"
     metrics = [
-        ("Cash on Hand — Start of Period", currency(d["cash_start"]),  "#212529"),
-        ("Cash on Hand — End of Period",   currency(d["cash_end"]),    "#0d6efd"),
-        ("Receipts",                        currency(receipts),         "#198754"),
-        ("Expenditures",                    currency(expenditures),     "#dc3545"),
-        ("Number of Contributions",         f"{n_contribs:,}",          "#212529"),
-        ("Average Contribution",            currency(avg_contrib),      "#212529"),
-        ("Burn Rate",                       pct(burn_rate),             burn_color),
-        ("Debts",                           currency(debts),            debt_color),
+        ("Cash on Hand — Start of Period",              currency(d["cash_start"]),               "#212529"),
+        ("Cash on Hand — End of Period",                currency(d["cash_end"]),                 "#0d6efd"),
+        ("Receipts (Contributions + Loans + Sales)",    currency(receipts),                      "#198754"),
+        ("Loans Received",                              currency(d.get("loans_received", 0)),    loans_color),
+        ("Expenditures",                                currency(expenditures),                  "#dc3545"),
+        ("Number of Contributions (incl. loans)",       f"{n_contribs:,}",                       "#212529"),
+        ("Average Contribution",                        currency(avg_contrib),                   "#212529"),
+        ("Burn Rate",                                   pct(burn_rate),                          burn_color),
+        ("Debts",                                       currency(debts),                         debt_color),
     ]
     for i in range(0, len(metrics), 2):
         pair = metrics[i:i+2]
@@ -248,6 +250,45 @@ def build_pdf_report(d, contributions, exp_df_with_cats,
                 ("VALIGN",        (0,0), (-1,-1), "TOP"),
             ]))
             story.append(t)
+
+    # ── LOANS RECEIVED ────────────────────────────────────────────────────────
+    if loans and d.get("loans_received", 0) > 0:
+        story.append(Spacer(1, 8))
+        story += section_header("Loans Received")
+
+        # Summary row
+        loans_summary = [
+            ("Total Loans Received This Period", currency(d.get("loans_received", 0))),
+            ("Outstanding Loans End of Period",  currency(d.get("outstanding_loans", 0))),
+        ]
+        summary_data = [[
+            Paragraph(
+                f'<font size="7" color="#6c757d">{lbl.upper()}</font><br/>'
+                f'<font size="11" color="#0d6efd"><b>{val}</b></font>',
+                body_style)
+            for lbl, val in loans_summary
+        ]]
+        ls_t = Table(summary_data, colWidths=[3.5*inch, 3.5*inch])
+        ls_t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,-1), LIGHT_GRAY),
+            ("BOX",           (0,0),(-1,-1), 0.5, RULE_COLOR),
+            ("INNERGRID",     (0,0),(-1,-1), 0.5, RULE_COLOR),
+            ("LEFTPADDING",   (0,0),(-1,-1), 10),
+            ("TOPPADDING",    (0,0),(-1,-1), 8),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ]))
+        story.append(ls_t)
+        story.append(Spacer(1, 8))
+
+        # Loan detail table
+        loan_rows = [(currency(l["amount"]), l["name"], l.get("relationship",""), l["date"])
+                     for l in loans]
+        story.append(data_table(
+            ["Amount", "Lender", "Relationship", "Date"],
+            loan_rows,
+            [1.4*inch, 3.0*inch, 1.2*inch, 1.4*inch],
+            right_cols=[0]
+        ))
 
     # ── EXPENDITURES ──────────────────────────────────────────────────────────
     story.append(PageBreak())
@@ -579,7 +620,8 @@ def extract_lines(pdf_bytes):
 
 def parse_summary_fields(lines):
     d = {"committee_name":"","report_date":"","filed_date":"","political_party":"",
-         "cash_start":0.0,"receipts":0.0,"expenditures":0.0,"cash_end":0.0,
+         "cash_start":0.0,"cash_contributions":0.0,"loans_received":0.0,
+         "property_sales":0.0,"receipts":0.0,"expenditures":0.0,"cash_end":0.0,
          "unpaid_bills":0.0,"outstanding_loans":0.0}
     for i, line in enumerate(lines):
         s = line.strip()
@@ -599,13 +641,17 @@ def parse_summary_fields(lines):
             if m: d["filed_date"] = m.group(1)
         for label, key in [
             ("Cash On Hand At Start Of Period","cash_start"),
-            ("Schedule A: Cash Contributions Total","receipts"),
+            ("Schedule A: Cash Contributions Total","cash_contributions"),
+            ("Schedule F1: Loans Received Total","loans_received"),
+            ("Schedule H2: Campaign Property Sales","property_sales"),
             ("Schedule B: Expenditure Total","expenditures"),
             ("Cash on Hand at End of Period","cash_end"),
             ("Schedule D: Unpaid Bills","unpaid_bills"),
             ("Schedule F2: Outstanding Loans","outstanding_loans"),
         ]:
             if label.lower() in s.lower(): d[key] = parse_money(s)
+    # Composite receipts = cash contributions + loans received + property sales
+    d["receipts"] = d["cash_contributions"] + d["loans_received"] + d["property_sales"]
     return d
 
 def parse_contributions(lines):
@@ -655,6 +701,83 @@ def parse_contributions(lines):
         contribs.append({"date":date,"name":name,"state":state,"zipcode":zipcode,"amount":amount})
     return contribs
 
+def parse_loans(lines):
+    """
+    Parse Schedule F1: Loans Received.
+
+    The table layout (from actual PDF x-positions) is:
+      Col 1 — Date Incurred     x ≈ 38
+      Col 2 — Name / Address    x ≈ 102  (lender name appears one line above the date row)
+      Col 3 — Relationship      x ≈ 302
+      Col 4 — Amount of Loan    x ≈ 518
+
+    A single entry looks like (in extracted text order):
+        Lahn, Zach                     ← name line (no date on this line)
+        5/22/2026  PO Box 129  Self  $500,000.00
+        Belle Plaine IA 52208          ← city/state line
+    """
+    loans = []
+    in_section = False
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+
+        # Section boundaries — must match the actual schedule header (has "Sch-F1"),
+        # NOT the summary line "Schedule F1: Loans Received Total $X"
+        if "Schedule F1: Loans Received" in s and "Sch-F1" in s:
+            in_section = True; i += 1; continue
+        if in_section and re.match(
+                r"^(Total Received|Total Unpaid|Total Loans Paid|Total Forgiven|"
+                r"Total Outstanding|Schedule F2:|Schedule B:|Schedule G:|Schedule D:)", s):
+            break
+        if not in_section or is_skip(s): i += 1; continue
+
+        # A data row starts with a date followed by address text and ends with $amount
+        # Pattern: DATE  <address words>  [RELATIONSHIP]  $AMOUNT
+        date_m = re.match(r"^(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+\$([\d,]+\.\d{2})\s*$", s)
+        if date_m:
+            date      = date_m.group(1)
+            mid_text  = date_m.group(2).strip()
+            amount    = float(date_m.group(3).replace(",", ""))
+
+            # Relationship keyword typically ends the mid_text
+            relationship = ""
+            rel_m = re.search(r"\b(Self|Spouse|Family|PAC|Other)\b", mid_text, re.I)
+            if rel_m:
+                relationship = rel_m.group(1)
+
+            # Name is on the line immediately before the date row
+            # (walk back skipping blank / header lines)
+            name = ""
+            for k in range(i - 1, max(i - 6, -1), -1):
+                cand = lines[k].strip()
+                if not cand or is_skip(cand): continue
+                # Stop if we hit another data row or a section header
+                if re.match(r"^(\d{1,2}/\d{1,2}/\d{4})", cand): break
+                if CITY_LINE_RE.match(cand): continue
+                if is_purpose(cand): continue
+                # This should be the lender name
+                name = cand
+                break
+
+            # State / zip from the city line after the date row
+            state = zipcode = ""
+            if i + 1 < len(lines):
+                m2 = re.search(r",?\s+([A-Z]{2})\s+(\d{5})", lines[i + 1])
+                if m2:
+                    state, zipcode = m2.group(1), m2.group(2)
+
+            loans.append({
+                "date":         date,
+                "name":         name or "Unknown",
+                "relationship": relationship,
+                "state":        state,
+                "zipcode":      zipcode,
+                "amount":       amount,
+            })
+        i += 1
+    return loans
+
 def parse_expenditures(lines):
     exp_list = []
     in_section = False
@@ -702,6 +825,7 @@ def parse_disclosure(pdf_bytes):
     lines = extract_lines(pdf_bytes)
     return {**parse_summary_fields(lines),
             "contributions":     parse_contributions(lines),
+            "loans":             parse_loans(lines),
             "expenditures_list": parse_expenditures(lines)}
 
 
@@ -745,11 +869,12 @@ if st.session_state.get("file_id") != file_id:
 
 d             = st.session_state["disclosure"]
 contributions = d["contributions"]
+loans         = d.get("loans", [])
 exp_list      = d["expenditures_list"]
-receipts      = d["receipts"]
+receipts      = d["receipts"]          # cash contributions + loans received + property sales
 expenditures  = d["expenditures"]
 debts         = d["unpaid_bills"] + d["outstanding_loans"]
-n_contribs    = len(contributions)
+n_contribs    = len(contributions) + len(loans)   # includes loans
 itemized      = [c for c in contributions if c["name"] not in ("Unitemized","Unknown")]
 avg_contrib   = receipts / n_contribs if n_contribs else 0.0
 burn_rate     = (expenditures / receipts * 100) if receipts else 0.0
@@ -769,13 +894,14 @@ st.markdown('<div class="section-header">📊 Top Lines</div>', unsafe_allow_htm
 c1, c2, c3 = st.columns(3)
 with c1:
     st.markdown(metric_card("Cash on Hand at Start of Period", fmt_cur(d["cash_start"])), unsafe_allow_html=True)
-    st.markdown(metric_card("Receipts", fmt_cur(receipts), "green"), unsafe_allow_html=True)
-    st.markdown(metric_card("Number of Contributions", f"{n_contribs:,}"), unsafe_allow_html=True)
+    st.markdown(metric_card("Receipts (Contributions + Loans + Sales)", fmt_cur(receipts), "green"), unsafe_allow_html=True)
+    st.markdown(metric_card("Number of Contributions (including loans)", f"{n_contribs:,}"), unsafe_allow_html=True)
 with c2:
     st.markdown(metric_card("Cash on Hand (End of Period)", fmt_cur(d["cash_end"]), "blue"), unsafe_allow_html=True)
     st.markdown(metric_card("Expenditures", fmt_cur(expenditures), "red"), unsafe_allow_html=True)
     st.markdown(metric_card("Average Contribution", fmt_cur(avg_contrib)), unsafe_allow_html=True)
 with c3:
+    st.markdown(metric_card("Loans Received", fmt_cur(d["loans_received"]), "blue" if d["loans_received"] > 0 else ""), unsafe_allow_html=True)
     st.markdown(metric_card("Burn Rate", fmt_pct(burn_rate), "red" if burn_rate > 80 else ""), unsafe_allow_html=True)
     st.markdown(metric_card("Debts", fmt_cur(debts), "red" if debts > 0 else ""), unsafe_allow_html=True)
 
@@ -827,6 +953,27 @@ if contributions:
                    }, hide_index=False, key="notable_donors")
 else:
     st.warning("No contribution data could be parsed.")
+
+
+# ── Loans Received ────────────────────────────────────────────────────────────
+if loans or d.get("loans_received", 0) > 0:
+    st.markdown('<div class="section-header">🏦 Loans Received</div>', unsafe_allow_html=True)
+    lc1, lc2 = st.columns(2)
+    with lc1:
+        st.markdown(metric_card("Total Loans Received This Period", fmt_cur(d["loans_received"]), "blue"), unsafe_allow_html=True)
+    with lc2:
+        st.markdown(metric_card("Outstanding Loans End of Period", fmt_cur(d["outstanding_loans"]), "red" if d["outstanding_loans"] > 0 else ""), unsafe_allow_html=True)
+
+    if loans:
+        loans_df = pd.DataFrame(loans)
+        loans_df["amount_fmt"] = loans_df["amount"].apply(fmt_cur)
+        display_loans = loans_df[["date","name","relationship","amount_fmt"]].rename(columns={
+            "date":"Date","name":"Lender","relationship":"Relationship","amount_fmt":"Amount"
+        })
+        st.dataframe(display_loans.reset_index(drop=True), use_container_width=True, hide_index=True)
+    else:
+        st.info(f"Loan total of {fmt_cur(d['loans_received'])} found in summary. "
+                "No individual loan line items were parsed from Schedule F1.")
 
 
 # ── Expenditures ──────────────────────────────────────────────────────────────
@@ -1114,6 +1261,7 @@ if st.button("Generate PDF Report", type="primary"):
                 n_contribs=n_contribs,
                 avg_contrib=avg_contrib,
                 burn_rate=burn_rate,
+                loans=loans,
                 notes_df=notes_df,
             )
             safe_name = re.sub(r"[^\w\s-]", "", d["committee_name"]).strip().replace(" ", "_")
